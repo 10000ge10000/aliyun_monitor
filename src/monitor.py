@@ -52,6 +52,7 @@ def check(user, tg_conf):
         # 数据清洗
         target_id = user['instance_id'].strip()
         region = user['region'].strip()
+        resgroup = user['resgroup'].strip()
         client = AcsClient(user['ak'].strip(), user['sk'].strip(), region)
         
         # 1. CDT 流量
@@ -66,6 +67,8 @@ def check(user, tg_conf):
         
         # 2. ECS 状态 (本地匹配模式)
         ecs_params = {'PageSize': 50, 'RegionId': region}
+        if resgroup:
+            ecs_params['ResourceGroupId'] = resgroup
         resp_ecs = do_request(client, 'DescribeInstances', ecs_params)
         
         status = "Unknown"
