@@ -62,7 +62,8 @@ def main():
         try:
             target_id = user.get('instance_id', '').strip()
             target_region = user.get('region', '').strip()
-            
+            resgroup = user.get('resgroup', '').strip()
+
             # [名字显示修复] 优先使用备注，没有则用ID，再没有则用Unknown
             user_name = user.get('name', '').strip()
             if not user_name:
@@ -86,6 +87,8 @@ def main():
 
             # 3. ECS 状态
             ecs_params = {'PageSize': 50, 'RegionId': target_region}
+            if resgroup:
+                ecs_params['ResourceGroupId'] = resgroup
             ecs_data = do_common_request(client, 'ecs.aliyuncs.com', '2014-05-26', 'DescribeInstances', ecs_params)
             
             status, ip, spec = "NotFound", "N/A", "N/A"

@@ -9,7 +9,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 # GitHub 仓库 raw 地址
-REPO_URL="https://raw.githubusercontent.com/10000ge10000/aliyun_monitor/main/src"
+REPO_URL="https://raw.githubusercontent.com/huzheyi/aliyun_monitor/main/src"
 
 echo -e "${BLUE}=============================================================${NC}"
 echo -e "${BLUE}           阿里云 CDT 流量监控 & 日报 一键部署脚本            ${NC}"
@@ -77,6 +77,7 @@ while true; do
     AK=""
     SK=""
     REGION=""
+    RESGROUP=""
     INSTANCE=""
     
     echo -e "\n${BLUE}>> 添加一个阿里云账号${NC}"
@@ -107,6 +108,9 @@ while true; do
         *) read -p "请输入 Region ID (如 cn-shanghai): " REGION ;;
     esac
 
+    echo -e "${CYAN}💡 提示: 如RAM用户授权到资源组，请输入资源组ID，否则留空${NC}"
+    read -p "资源组 ID: " RESGROUP
+
     echo -e "${CYAN}💡 提示: 请前往 ECS 控制台 -> 实例列表 -> 实例 ID 列 (以 i- 开头)${NC}"
     read -p "ECS 实例 ID: " INSTANCE
     
@@ -114,6 +118,7 @@ while true; do
     AK=$(echo "$AK" | tr -d '[:space:]')
     SK=$(echo "$SK" | tr -d '[:space:]')
     REGION=$(echo "$REGION" | tr -d '[:space:]')
+    RESGROUP=$(echo "$RESGROUP" | tr -d '[:space:]')
     INSTANCE=$(echo "$INSTANCE" | tr -d '[:space:]')
     
     # [修复点] 备注名处理逻辑优化
@@ -140,8 +145,8 @@ while true; do
     BILL_LIMIT=${BILL_LIMIT:-1.0}
 
     # 构建 JSON
-    USER_OBJ="{\"name\": \"$NAME\", \"ak\": \"$AK\", \"sk\": \"$SK\", \"region\": \"$REGION\", \"instance_id\": \"$INSTANCE\", \"traffic_limit\": $LIMIT, \"bill_threshold\": $BILL_LIMIT, \"quota\": 200}"
-    
+    USER_OBJ="{\"name\": \"$NAME\", \"ak\": \"$AK\", \"sk\": \"$SK\", \"region\": \"$REGION\", \"resgroup\": \"$RESGROUP\", \"instance_id\": \"$INSTANCE\", \"traffic_limit\": $LIMIT, \"bill_threshold\": $BILL_LIMIT, \"quota\": 200}"
+
     if [ -z "$USERS_JSON" ]; then
         USERS_JSON="$USER_OBJ"
     else
