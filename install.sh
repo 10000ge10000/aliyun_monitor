@@ -12,7 +12,7 @@ NC='\033[0m'
 REPO_URL="https://raw.githubusercontent.com/10000ge10000/aliyun_monitor/main/src"
 
 echo -e "${BLUE}=============================================================${NC}"
-echo -e "${BLUE}           阿里云 CDT 流量监控 & 日报 一键部署脚本            ${NC}"
+echo -e "${BLUE}       阿里云 CDT 流量监控 & 日报 一键部署脚本 (交互版)      ${NC}"
 echo -e "${BLUE}=============================================================${NC}"
 
 if [ "$EUID" -ne 0 ]; then
@@ -22,13 +22,14 @@ fi
 
 # 1. 目录准备
 TARGET_DIR="/opt/scripts"
-mkdir -p "$TARGET_DIR"
+if [ ! -d "$TARGET_DIR" ]; then
+    mkdir -p "$TARGET_DIR"
+    echo -e "${GREEN}创建目录: ${TARGET_DIR}${NC}"
+fi
 
 # 2. 安装依赖
 echo -e "${YELLOW}>> 安装系统依赖...${NC}"
-if [ -f /etc/alpine-release ]; then
-    apk update && apk add bash python3 py3-pip curl wget ca-certificates
-elif [ -f /etc/debian_version ]; then
+if [ -f /etc/debian_version ]; then
     apt-get update -y && apt-get install -y python3 python3-venv python3-pip cron wget
 elif [ -f /etc/redhat-release ]; then
     yum install -y python3 python3-pip cronie wget
@@ -42,12 +43,10 @@ if [ ! -d "$VENV_DIR" ]; then
     echo -e "${GREEN}虚拟环境创建完成。${NC}"
 fi
 
-# 4. 安装 Python 依赖库
 echo -e "${YELLOW}>> 安装 Python 依赖库...${NC}"
-"$VENV_DIR/bin/pip" install --upgrade pip >/dev/null 2>&1
-"$VENV_DIR/bin/pip" install requests aliyun-python-sdk-core >/dev/null 2>&1
+"$VENV_DIR/bin/pip" install requests aliyun-python-sdk-core aliyun-python-sdk-ecs aliyun-python-sdk-bssopenapi --upgrade >/dev/null 2>&1
 
-# 5. 下载源码
+# 4. 下载源码
 echo -e "${YELLOW}>> 从 GitHub 下载最新脚本...${NC}"
 wget -O "${TARGET_DIR}/monitor.py" "${REPO_URL}/monitor.py"
 wget -O "${TARGET_DIR}/report.py" "${REPO_URL}/report.py"
@@ -57,7 +56,7 @@ if [ ! -s "${TARGET_DIR}/monitor.py" ]; then
     exit 1
 fi
 
-# 6. 交互式配置
+# 5. 交互式配置
 echo -e "\n${BLUE}### 配置 Telegram ###${NC}"
 echo -e "1. 联系 ${CYAN}@BotFather${NC} -> 创建机器人获取 Token"
 echo -e "2. 联系 ${CYAN}@userinfobot${NC} -> 获取您的 Chat ID"
@@ -72,19 +71,17 @@ echo -e "⚠️  权限要求: AliyunECSFullAccess, AliyunCDTFullAccess, AliyunB
 USERS_JSON=""
 
 while true; do
-    # 变量初始化
-    NAME=""
-    AK=""
-    SK=""
-    REGION=""
-    INSTANCE=""
-    
     echo -e "\n${BLUE}>> 添加一个阿里云账号${NC}"
     
+    # 备注名
+    read -p "请输入备注名 (例如 HK-Server): " NAME
+    
+    # AK/SK 指引
     echo -e "${CYAN}💡 提示: AccessKey 在 RAM 用户详情页 -> 创建 AccessKey${NC}"
     read -p "AccessKey ID: " AK
     read -p "AccessKey Secret: " SK
     
+    # Region 菜单选择
     echo -e "${CYAN}💡 提示: 请选择 ECS 实例所在的区域 (输入数字)${NC}"
     echo "  1) 香港 (cn-hongkong)"
     echo "  2) 新加坡 (ap-southeast-1)"
@@ -107,40 +104,16 @@ while true; do
         *) read -p "请输入 Region ID (如 cn-shanghai): " REGION ;;
     esac
 
+    # 实例 ID 指引
     echo -e "${CYAN}💡 提示: 请前往 ECS 控制台 -> 实例列表 -> 实例 ID 列 (以 i- 开头)${NC}"
     read -p "ECS 实例 ID: " INSTANCE
     
-    # 去空格处理
-    AK=$(echo "$AK" | tr -d '[:space:]')
-    SK=$(echo "$SK" | tr -d '[:space:]')
-    REGION=$(echo "$REGION" | tr -d '[:space:]')
-    INSTANCE=$(echo "$INSTANCE" | tr -d '[:space:]')
-    
-    # [修复点] 备注名处理逻辑优化
-    read -p "请输入备注名 (留空则使用实例ID): " NAME
-    
-    # 1. 先去空格 (解决用户输入空格导致误判的问题)
-    NAME=$(echo "$NAME" | tr -d '[:space:]')
-    
-    # 2. 如果去空后是空的，则使用 Instance ID
-    if [ -z "$NAME" ]; then
-        NAME="$INSTANCE"
-    fi
-    
-    # 3. 如果 Instance ID 也是空的 (极少见)，给个默认名
-    if [ -z "$NAME" ]; then
-        NAME="Unamed_Server"
-    fi
-
     # 阈值
     read -p "关机阈值 (GB, 默认180): " LIMIT
     LIMIT=${LIMIT:-180}
-    
-    read -p "账单报警阈值 ($美元, 默认1.0): " BILL_LIMIT
-    BILL_LIMIT=${BILL_LIMIT:-1.0}
 
-    # 构建 JSON
-    USER_OBJ="{\"name\": \"$NAME\", \"ak\": \"$AK\", \"sk\": \"$SK\", \"region\": \"$REGION\", \"instance_id\": \"$INSTANCE\", \"traffic_limit\": $LIMIT, \"bill_threshold\": $BILL_LIMIT, \"quota\": 200}"
+    # 构建 JSON 对象
+    USER_OBJ="{\"name\": \"$NAME\", \"ak\": \"$AK\", \"sk\": \"$SK\", \"region\": \"$REGION\", \"instance_id\": \"$INSTANCE\", \"traffic_limit\": $LIMIT, \"quota\": 200}"
     
     if [ -z "$USERS_JSON" ]; then
         USERS_JSON="$USER_OBJ"
@@ -148,15 +121,14 @@ while true; do
         USERS_JSON="$USERS_JSON, $USER_OBJ"
     fi
 
-    echo -e "${GREEN}✅ 已添加账号: ${NAME}${NC}"
     echo ""
-    read -p "是否继续添加下一个账号? (y/N): " CONTIN
+    read -p "是否继续添加第二个账号? (y/n): " CONTIN
     if [[ ! "$CONTIN" =~ ^[Yy]$ ]]; then
         break
     fi
 done
 
-# 生成配置
+# 6. 生成配置文件 (config.json)
 cat > "${TARGET_DIR}/config.json" <<EOF
 {
     "telegram": {
@@ -170,17 +142,17 @@ cat > "${TARGET_DIR}/config.json" <<EOF
 EOF
 echo -e "${GREEN}配置文件已生成: ${TARGET_DIR}/config.json${NC}"
 
-# 设置 Crontab
+# 7. 设置 Crontab
 echo -e "${YELLOW}>> 配置定时任务...${NC}"
 crontab -l > /tmp/cron_bk 2>/dev/null
-grep -v "aliyun_monitor" /tmp/cron_bk > /tmp/cron_clean
+grep -v "aliyun_monitor" /tmp/cron_bk > /tmp/cron_clean # 清理旧任务
 
-echo "* * * * * PYTHONWARNINGS=ignore ${VENV_DIR}/bin/python ${TARGET_DIR}/monitor.py >> ${TARGET_DIR}/monitor.log 2>&1 #aliyun_monitor" >> /tmp/cron_clean
-echo "0 9 * * * PYTHONWARNINGS=ignore ${VENV_DIR}/bin/python ${TARGET_DIR}/report.py >> ${TARGET_DIR}/report.log 2>&1 #aliyun_monitor" >> /tmp/cron_clean
+echo "*/5 * * * * ${VENV_DIR}/bin/python ${TARGET_DIR}/monitor.py >> ${TARGET_DIR}/monitor.log 2>&1 #aliyun_monitor" >> /tmp/cron_clean
+echo "0 9 * * * ${VENV_DIR}/bin/python ${TARGET_DIR}/report.py >> ${TARGET_DIR}/report.log 2>&1 #aliyun_monitor" >> /tmp/cron_clean
 
 crontab /tmp/cron_clean
 rm /tmp/cron_bk /tmp/cron_clean
 
 echo -e "\n${GREEN}🎉 安装完成！${NC}"
 echo -e "您可以使用以下命令手动测试日报发送："
-echo -e "${YELLOW}PYTHONWARNINGS=ignore ${VENV_DIR}/bin/python ${TARGET_DIR}/report.py${NC}"
+echo -e "${YELLOW}${VENV_DIR}/bin/python ${TARGET_DIR}/report.py${NC}"
