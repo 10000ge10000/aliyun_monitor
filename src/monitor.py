@@ -23,10 +23,12 @@ NOTIFY_COOLDOWN = 3600
 # 流量超标提醒冷却时间（秒）：24 小时只提醒一次
 OVERLIMIT_COOLDOWN = 86400
 # 等待实例启动：轮询超时 / 间隔（秒）
-START_WAIT_TIMEOUT  = 120
+START_WAIT_TIMEOUT  = 180
 START_POLL_INTERVAL = 10
-# 连续启动失败超过此次数后，发出"资源不足"告警并停止重试（需人工干预）
+# 连续启动失败超过此次数后，降低重试频率（每 30 分钟重试一次，而非每 5 分钟）
 MAX_START_FAILURES = 3
+# 资源不足时的重试冷却时间（秒）：30 分钟重试一次，而不是彻底放弃
+RESOURCE_RETRY_COOLDOWN = 1800
 
 # 初始化日志
 logger = logging.getLogger(__name__)
@@ -140,54 +142,85 @@ def check_and_act(user, tg_conf, state):
             # ---- 流量安全 ----
             if status == "Stopped":
                 failures = get_start_failures(state, instance_id)
+
+                # 即使多次失败也不放弃，只是降低重试频率
                 if failures >= MAX_START_FAILURES:
-                    # 已多次失败，判定为资源不足，每小时提醒一次
-                    logger.warning(f"[{name}] 资源不足，已连续 {failures} 次启动失败，跳过重试")
-                    if can_notify(state, instance_id, 'no_resource'):
-                        msg = (f"机器: {name}\n当前流量: {curr_gb:.2f}GB\n"
-                               f"\u26a0\ufe0f 已连续 {failures} 次启动失败，当前区域可能资源不足，"
-                               f"请前往阿里云控制台手动确认！")
-                        send_tg_alert(tg_conf, "资源不足告警", msg, "red")
-                        mark_notified(state, instance_id, 'no_resource')
-                    return
+                    last_retry = state.get(instance_id, {}).get('last_retry_ts', 0)
+                    elapsed = time.time() - last_retry
+                    if elapsed < RESOURCE_RETRY_COOLDOWN:
+                        remaining = int(RESOURCE_RETRY_COOLDOWN - elapsed)
+                        logger.info(f"[{name}] 已连续 {failures} 次启动失败，"
+                                    f"距下次重试还需 {remaining}s，本轮跳过")
+                        return
+                    # 超过冷却时间，继续重试
+                    logger.info(f"[{name}] 已连续 {failures} 次启动失败，"
+                                f"冷却期已过，再次尝试启动...")
+
+                # 记录本次重试时间
+                state.setdefault(instance_id, {})['last_retry_ts'] = time.time()
 
                 logger.info(f"[{name}] 流量安全({curr_gb:.2f}GB)，尝试启动实例...")
-                start_req = StartInstanceRequest()
-                start_req.set_InstanceId(instance_id)
-                client.do_action_with_exception(start_req)
 
-                # 轮询等待，确认实例真正进入 Running 状态
+                # --- 调用启动 API（单独 try-except 防止异常跳过计数） ---
+                try:
+                    start_req = StartInstanceRequest()
+                    start_req.set_InstanceId(instance_id)
+                    client.do_action_with_exception(start_req)
+                    logger.info(f"[{name}] StartInstance API 调用成功，等待实例进入 Running...")
+                except Exception as api_err:
+                    err_msg = str(api_err)
+                    new_failures = failures + 1
+                    set_start_failures(state, instance_id, new_failures)
+                    logger.warning(f"[{name}] StartInstance API 调用失败: {err_msg}，"
+                                   f"累计失败 {new_failures} 次")
+                    if can_notify(state, instance_id, 'start_failed'):
+                        msg = (f"机器: {name}\n当前流量: {curr_gb:.2f}GB\n"
+                               f"⚠️ 启动 API 调用失败: {err_msg}\n"
+                               f"累计失败 {new_failures} 次，"
+                               f"脚本将每 {RESOURCE_RETRY_COOLDOWN//60} 分钟自动重试。")
+                        send_tg_alert(tg_conf, "启动失败告警", msg, "red")
+                        mark_notified(state, instance_id, 'start_failed')
+                    return
+
+                # --- 轮询等待实例真正进入 Running 状态 ---
                 started = False
                 waited  = 0
                 while waited < START_WAIT_TIMEOUT:
                     time.sleep(START_POLL_INTERVAL)
                     waited += START_POLL_INTERVAL
-                    real_status = get_instance_status(client, instance_id)
+                    try:
+                        real_status = get_instance_status(client, instance_id)
+                    except Exception:
+                        real_status = "Unknown"
                     logger.info(f"[{name}] 等待启动... 当前状态: {real_status} ({waited}s)")
                     if real_status == "Running":
                         started = True
+                        break
+                    elif real_status == "Stopped":
+                        # 已经回落到 Stopped，说明启动被拒绝（资源不足等）
+                        logger.warning(f"[{name}] 实例已回落到 Stopped 状态，启动被拒绝")
                         break
 
                 if started:
                     # 启动成功，重置失败计数
                     reset_start_failures(state, instance_id)
-                    # 清除 no_resource 告警冷却，以便下次资源不足时能正常告警
                     state.setdefault(instance_id, {}).pop('no_resource', None)
-                    logger.info(f"[{name}] 实例已恢复运行")
+                    state.setdefault(instance_id, {}).pop('last_retry_ts', None)
+                    logger.info(f"[{name}] 实例已恢复运行 ✅")
                     if can_notify(state, instance_id, 'resumed'):
-                        msg = f"机器: {name}\n当前流量: {curr_gb:.2f}GB\n动作: 恢复运行 \u2705"
+                        msg = f"机器: {name}\n当前流量: {curr_gb:.2f}GB\n动作: 恢复运行 ✅"
                         send_tg_alert(tg_conf, "恢复监控", msg, "green")
                         mark_notified(state, instance_id, 'resumed')
                 else:
-                    # 超时未启动，计为一次失败
+                    # 超时未启动或回落到 Stopped，计为一次失败
                     new_failures = failures + 1
                     set_start_failures(state, instance_id, new_failures)
-                    logger.warning(f"[{name}] 启动超时，可能资源不足，累计失败 {new_failures} 次")
+                    logger.warning(f"[{name}] 启动超时或被拒绝，累计失败 {new_failures} 次")
                     if can_notify(state, instance_id, 'start_failed'):
                         msg = (f"机器: {name}\n当前流量: {curr_gb:.2f}GB\n"
-                               f"\u26a0\ufe0f 尝试启动但 {START_WAIT_TIMEOUT}s 内未变为 Running 状态，"
-                               f"累计失败 {new_failures}/{MAX_START_FAILURES} 次。"
-                               f"（可能当前区域资源不足）")
+                               f"⚠️ 尝试启动但 {START_WAIT_TIMEOUT}s 内未变为 Running 状态，"
+                               f"累计失败 {new_failures} 次。\n"
+                               f"脚本将每 {RESOURCE_RETRY_COOLDOWN//60} 分钟自动重试，无需手动干预。")
                         send_tg_alert(tg_conf, "启动失败告警", msg, "red")
                         mark_notified(state, instance_id, 'start_failed')
 
