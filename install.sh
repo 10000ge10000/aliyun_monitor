@@ -71,6 +71,12 @@ echo -e "⚠️  权限要求: AliyunECSFullAccess, AliyunCDTFullAccess, AliyunB
 USERS_JSON=""
 
 while true; do
+    AK=""
+    SK=""
+    REGION=""
+    RESGROUP=""
+    INSTANCE=""
+    
     echo -e "\n${BLUE}>> 添加一个阿里云账号${NC}"
     
     # 备注名
@@ -104,6 +110,10 @@ while true; do
         *) read -p "请输入 Region ID (如 cn-shanghai): " REGION ;;
     esac
 
+    # 资源组 ID（可选，用于 RAM 权限收敛）
+    echo -e "${CYAN}💡 提示: 如 RAM 用户授权到资源组，请输入资源组 ID，否则直接回车跳过${NC}"
+    read -p "资源组 ID (可选): " RESGROUP
+
     # 实例 ID 指引
     echo -e "${CYAN}💡 提示: 请前往 ECS 控制台 -> 实例列表 -> 实例 ID 列 (以 i- 开头)${NC}"
     read -p "ECS 实例 ID: " INSTANCE
@@ -113,7 +123,7 @@ while true; do
     LIMIT=${LIMIT:-180}
 
     # 构建 JSON 对象
-    USER_OBJ="{\"name\": \"$NAME\", \"ak\": \"$AK\", \"sk\": \"$SK\", \"region\": \"$REGION\", \"instance_id\": \"$INSTANCE\", \"traffic_limit\": $LIMIT, \"quota\": 200}"
+    USER_OBJ="{\"name\": \"$NAME\", \"ak\": \"$AK\", \"sk\": \"$SK\", \"region\": \"$REGION\", \"resgroup\": \"$RESGROUP\", \"instance_id\": \"$INSTANCE\", \"traffic_limit\": $LIMIT, \"quota\": 200}"
     
     if [ -z "$USERS_JSON" ]; then
         USERS_JSON="$USER_OBJ"

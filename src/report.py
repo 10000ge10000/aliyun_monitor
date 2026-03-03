@@ -69,7 +69,8 @@ def main():
         try:
             target_id = user.get('instance_id', '').strip()
             target_region = user.get('region', '').strip()
-            
+            resgroup = user.get('resgroup', '').strip()
+
             # [名字显示修复] 优先使用备注，没有则用ID，再没有则用Unknown
             user_name = user.get('name', '').strip()
             if not user_name:
@@ -83,16 +84,24 @@ def main():
             if traffic_data:
                 traffic_gb = sum(d.get('Traffic', 0) for d in traffic_data.get('TrafficDetails', [])) / (1024**3)
 
-            # 2. BSS 账单
-            bill_params = {'BillingCycle': datetime.datetime.now().strftime("%Y-%m")}
-            bill_data = do_common_request(client, 'business.ap-southeast-1.aliyuncs.com', '2017-12-14', 'QueryBillOverview', bill_params)
+            # 2. BSS 账单 (DescribeInstanceBill: 仅统计指定实例账单)
+            bill_params = {
+                'BillingCycle': datetime.datetime.now().strftime("%Y-%m"),
+                'InstanceID': target_id
+            }
+            bill_data = do_common_request(client, 'business.aliyuncs.com', '2017-12-14', 'DescribeInstanceBill', bill_params)
             bill_amount = -1
+            bill_currency = 'USD'
             if bill_data:
-                items = bill_data.get('Data', {}).get('Items', {}).get('Item', [])
-                bill_amount = sum(item.get('PretaxAmount', 0) for item in items)
+                items = bill_data.get('Data', {}).get('Items', [])
+                if items:
+                    bill_amount = sum(float(item.get('PretaxAmount', 0)) for item in items)
+                    bill_currency = items[0].get('Currency', 'USD')
 
             # 3. ECS 状态
             ecs_params = {'PageSize': 50, 'RegionId': target_region}
+            if resgroup:
+                ecs_params['ResourceGroupId'] = resgroup
             ecs_data = do_common_request(client, 'ecs.aliyuncs.com', '2014-05-26', 'DescribeInstances', ecs_params)
             
             status, ip, spec = "NotFound", "N/A", "N/A"
@@ -129,6 +138,10 @@ def main():
                 traffic_str = "⚠️ 查询失败"
             
             bill_str = f"${bill_amount:.2f}" if bill_amount != -1 else "Fail"
+            if bill_amount != -1 and bill_currency == 'CNY':
+                bill_str = f"¥{bill_amount:.2f}"
+                bill_limit = bill_limit * 7.0  # USD 阈值换算为 CNY
+
             status_icon = "✅"
             if traffic_gb >= 0 and traffic_gb > quota: status_icon = "⚠️ 流量超标"
             if bill_amount > bill_limit: status_icon = "💸 扣费预警"

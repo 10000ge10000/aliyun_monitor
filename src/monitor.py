@@ -114,7 +114,7 @@ def get_instance_status(client, instance_id):
 
 def check_and_act(user, tg_conf, state):
     instance_id = user['instance_id']
-    name        = user['name']
+    name        = user.get('name', instance_id)
     try:
         client = AcsClient(user['ak'], user['sk'], user['region'])
 
