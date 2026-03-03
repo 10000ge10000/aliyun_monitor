@@ -32,21 +32,28 @@ def send_tg_report(tg_conf, message):
     except:
         pass
 
-def do_common_request(client, domain, version, action, params=None, method='POST'):
-    try:
-        request = CommonRequest()
-        request.set_domain(domain)
-        request.set_version(version)
-        request.set_action_name(action)
-        request.set_method(method)
-        request.set_protocol_type('https')
-        if params:
-            for k, v in params.items():
-                request.add_query_param(k, v)
-        response = client.do_action_with_exception(request)
-        return json.loads(response.decode('utf-8'))
-    except Exception as e:
-        return None
+def do_common_request(client, domain, version, action, params=None, method='POST', timeout=30, retries=3):
+    for attempt in range(1, retries + 1):
+        try:
+            request = CommonRequest()
+            request.set_domain(domain)
+            request.set_version(version)
+            request.set_action_name(action)
+            request.set_method(method)
+            request.set_protocol_type('https')
+            request.set_connect_timeout(timeout * 1000)   # 毫秒
+            request.set_read_timeout(timeout * 1000)       # 毫秒
+            if params:
+                for k, v in params.items():
+                    request.add_query_param(k, v)
+            response = client.do_action_with_exception(request)
+            return json.loads(response.decode('utf-8'))
+        except Exception as e:
+            if attempt < retries:
+                import time
+                time.sleep(2 * attempt)
+                continue
+            return None
 
 def main():
     config = load_config()
@@ -72,7 +79,7 @@ def main():
             
             # 1. CDT 流量
             traffic_data = do_common_request(client, 'cdt.aliyuncs.com', '2021-08-13', 'ListCdtInternetTraffic')
-            traffic_gb = 0.0
+            traffic_gb = -1  # -1 表示查询失败
             if traffic_data:
                 traffic_gb = sum(d.get('Traffic', 0) for d in traffic_data.get('TrafficDetails', [])) / (1024**3)
 
@@ -113,12 +120,19 @@ def main():
             # 4. 判定
             quota = user.get('traffic_limit', 180)
             bill_limit = user.get('bill_threshold', 1.0)
-            percent = (traffic_gb / quota) * 100
+            
+            if traffic_gb >= 0:
+                percent = (traffic_gb / quota) * 100
+                traffic_str = f"{traffic_gb:.2f} GB ({percent:.1f}%)"
+            else:
+                percent = 0
+                traffic_str = "⚠️ 查询失败"
             
             bill_str = f"${bill_amount:.2f}" if bill_amount != -1 else "Fail"
             status_icon = "✅"
-            if traffic_gb > quota: status_icon = "⚠️ 流量超标"
+            if traffic_gb >= 0 and traffic_gb > quota: status_icon = "⚠️ 流量超标"
             if bill_amount > bill_limit: status_icon = "💸 扣费预警"
+            if traffic_gb < 0: status_icon = "⚠️ 流量查询异常"
             
             run_icon = "🟢" if status == "Running" else "🔴"
             if status == "Stopped": run_icon = "⚫"
@@ -128,7 +142,7 @@ def main():
                 f"👤 *{user_name}* ({spec})\n"
                 f"   🖥️ 状态: {run_icon} {status}\n"
                 f"   🌐 IP: `{ip}`\n"
-                f"   📉 流量: {traffic_gb:.2f} GB ({percent:.1f}%)\n"
+                f"   📉 流量: {traffic_str}\n"
                 f"   💰 账单: *{bill_str}*\n"
                 f"   📝 评价: {status_icon}\n"
             )

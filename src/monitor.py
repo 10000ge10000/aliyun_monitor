@@ -124,6 +124,8 @@ def check_and_act(user, tg_conf, state):
         req_traffic.set_version('2021-08-13')
         req_traffic.set_action_name('ListCdtInternetTraffic')
         req_traffic.set_method('POST')
+        req_traffic.set_connect_timeout(30000)   # 30秒
+        req_traffic.set_read_timeout(30000)       # 30秒
         resp_traffic = client.do_action_with_exception(req_traffic)
         data_traffic = json.loads(resp_traffic.decode('utf-8'))
         total_bytes = sum(d.get('Traffic', 0) for d in data_traffic.get('TrafficDetails', []))
