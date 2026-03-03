@@ -84,19 +84,31 @@ def main():
             if traffic_data:
                 traffic_gb = sum(d.get('Traffic', 0) for d in traffic_data.get('TrafficDetails', [])) / (1024**3)
 
-            # 2. BSS 账单 (DescribeInstanceBill: 仅统计指定实例账单)
+            # 2. BSS 账单 (兼容国际站/国内站: 优先 DescribeInstanceBill，失败回退 QueryBillOverview)
+            bill_amount = -1
+            bill_currency = 'USD'
+
+            # 尝试1: DescribeInstanceBill (精确到实例)
             bill_params = {
                 'BillingCycle': datetime.datetime.now().strftime("%Y-%m"),
                 'InstanceID': target_id
             }
-            bill_data = do_common_request(client, 'business.aliyuncs.com', '2017-12-14', 'DescribeInstanceBill', bill_params)
-            bill_amount = -1
-            bill_currency = 'USD'
-            if bill_data:
+            bill_data = do_common_request(client, 'business.aliyuncs.com', '2017-12-14', 'DescribeInstanceBill', bill_params, retries=1)
+            if bill_data and bill_data.get('Success'):
                 items = bill_data.get('Data', {}).get('Items', [])
                 if items:
                     bill_amount = sum(float(item.get('PretaxAmount', 0)) for item in items)
                     bill_currency = items[0].get('Currency', 'USD')
+
+            # 尝试2: 回退到 QueryBillOverview (国际站兼容)
+            if bill_amount == -1:
+                bill_params2 = {'BillingCycle': datetime.datetime.now().strftime("%Y-%m")}
+                bill_data2 = do_common_request(client, 'business.ap-southeast-1.aliyuncs.com', '2017-12-14', 'QueryBillOverview', bill_params2)
+                if bill_data2:
+                    items2 = bill_data2.get('Data', {}).get('Items', {}).get('Item', [])
+                    bill_amount = sum(float(item.get('PretaxAmount', 0)) for item in items2)
+                    if items2:
+                        bill_currency = items2[0].get('Currency', 'USD')
 
             # 3. ECS 状态
             ecs_params = {'PageSize': 50, 'RegionId': target_region}
