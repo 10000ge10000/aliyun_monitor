@@ -1,6 +1,6 @@
+sh << 'EOF'
 #!/bin/sh
-# Alpine VNC Auto Install - Paste in VNC text box (max 2000 chars, ASCII only)
-# For Aliyun ECS with Alpine virt ISO custom image
+# Alpine VNC Auto Install
 P="yiwan123"
 D="/dev/vda"
 R="http://mirrors.aliyun.com/alpine/v3.23"
@@ -50,3 +50,4 @@ chroot /mnt apk del syslinux 2>/dev/null
 sync
 umount /mnt/boot /mnt/dev /mnt/proc /mnt/sys /mnt 2>/dev/null
 reboot
+EOF
