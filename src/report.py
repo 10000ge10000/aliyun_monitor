@@ -1,10 +1,22 @@
 # -*- coding: utf-8 -*-
-import json
-import requests
-import datetime
-import os
 import sys
 import warnings
+
+# 修正 urllib3 在 Python 3.12 下引发的 SNI 丢失问题
+try:
+    from aliyunsdkcore.vendored.requests.packages.urllib3.util import ssl_
+    ssl_.HAS_SNI = True
+except Exception:
+    pass
+
+import socket
+# 强制使用 IPv4 避免 IPv6 黑洞
+_orig_getaddrinfo = socket.getaddrinfo
+def _getaddrinfo_ipv4_only(host, port, family=0, type=0, proto=0, flags=0):
+    res = _orig_getaddrinfo(host, port, family, type, proto, flags)
+    ipv4_res = [r for r in res if r[0] == socket.AF_INET]
+    return ipv4_res if ipv4_res else res
+socket.getaddrinfo = _getaddrinfo_ipv4_only
 
 warnings.filterwarnings("ignore")
 
@@ -41,8 +53,8 @@ def do_common_request(client, domain, version, action, params=None, method='POST
             request.set_action_name(action)
             request.set_method(method)
             request.set_protocol_type('https')
-            request.set_connect_timeout(timeout * 1000)   # 毫秒
-            request.set_read_timeout(timeout * 1000)       # 毫秒
+            request.set_connect_timeout(5000)   # 连接 5 秒内必须成功，避免黑洞 IP 卡死
+            request.set_read_timeout(15000)      # 读取 15 秒
             if params:
                 for k, v in params.items():
                     request.add_query_param(k, v)
