@@ -122,30 +122,6 @@ function run_full_install() {
         exit 1
     fi
 
-    # 5. [核心修复环节] 使用 Python 动态修补下载下来的脚本
-    echo -e "${YELLOW}>> 正在挂载双端账单适配与网络寻址 Bug 修复补丁...${NC}"
-    python3 -c "
-import os
-files = ['${TARGET_DIR}/report.py', '${TARGET_DIR}/monitor.py']
-for file in files:
-    if not os.path.exists(file): continue
-    with open(file, 'r', encoding='utf-8') as f:
-        content = f.read()
-
-    # 修复 report.py 中的 CDT 请求卡死问题 (强制使用 cn-hangzhou 区域实例化客户端)
-    content = content.replace(\"do_common_request(client, 'cdt.aliyuncs.com'\", \"do_common_request(AcsClient(user['ak'].strip(), user['sk'].strip(), 'cn-hangzhou'), 'cdt.aliyuncs.com'\")
-    
-    # 修复 monitor.py 中的 CDT 请求卡死问题
-    content = content.replace(\"client.do_action_with_exception(req_cdt)\", \"AcsClient(user['ak'].strip(), user['sk'].strip(), 'cn-hangzhou').do_action_with_exception(req_cdt)\")
-
-    # 双端账单节点及货币单位动态适配
-    content = content.replace(\"'business.ap-southeast-1.aliyuncs.com'\", \"user.get('bill_endpoint', 'business.ap-southeast-1.aliyuncs.com')\")
-    content = content.replace('f\"${bill_amount:.2f}\"', 'f\"{user.get(\\'currency\\', \\'$\\' )}{bill_amount:.2f}\"')
-
-    with open(file, 'w', encoding='utf-8') as f:
-        f.write(content)
-"
-
     # 6. 交互式配置 Telegram
     echo -e "\n${BLUE}### 配置 Telegram ###${NC}"
     echo -e "1. 联系 ${CYAN}@BotFather${NC} -> 创建机器人获取 Token"
