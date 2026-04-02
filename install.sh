@@ -18,7 +18,7 @@ CONFIG_FILE="${TARGET_DIR}/config.json"
 CURRENT_USER_JSON=""
 
 echo -e "${BLUE}=============================================================${NC}"
-echo -e "${BLUE}     阿里云 CDT 流量监控 & 日报 一键部署/管理脚本 (交互版)   ${NC}"
+echo -e "${BLUE}    阿里云 CDT 流量监控 & 日报 一键部署/管理脚本 (修复增强版)  ${NC}"
 echo -e "${BLUE}=============================================================${NC}"
 
 if [ "$EUID" -ne 0 ]; then
@@ -28,9 +28,9 @@ fi
 
 # ================= 核心功能函数 =================
 
-# 收集单个用户信息的函数 (修复了屏幕输出被吞的问题)
+# 收集单个用户信息的函数
 function get_single_user_json() {
-    local AK="" SK="" REGION="" RESGROUP="" INSTANCE="" NAME="" LIMIT=""
+    local AK="" SK="" REGION="" INSTANCE="" NAME="" LIMIT="" BILL_ENDPOINT="" CURRENCY=""
 
     echo -e "\n${BLUE}>> 配置阿里云账号/实例信息${NC}"
     read -p "请输入备注名 (例如 HK-Server): " NAME
@@ -39,6 +39,21 @@ function get_single_user_json() {
     read -p "AccessKey ID: " AK
     read -p "AccessKey Secret: " SK
     
+    # --- 按实例区分国内外账单体系 ---
+    echo -e "\n${CYAN}💡 提示: 请选择该账号所属的阿里云类型 (决定账单查询节点与货币单位)${NC}"
+    echo "  1) 国内区 (阿里云中国站，人民币 ￥ 结算)"
+    echo "  2) 国际区 (阿里云国际站，美元 $ 结算)"
+    read -p "请选择 (1-2, 默认 1): " ACC_TYPE_OPT
+    if [ "$ACC_TYPE_OPT" == "2" ]; then
+        BILL_ENDPOINT="business.ap-southeast-1.aliyuncs.com"
+        CURRENCY="$"
+    else
+        BILL_ENDPOINT="business.aliyuncs.com"
+        CURRENCY="¥"
+    fi
+    echo -e "${GREEN}已设置为: 账单节点=$BILL_ENDPOINT | 货币=$CURRENCY${NC}\n"
+    # --------------------------------------
+
     echo -e "${CYAN}💡 提示: 请选择 ECS 实例所在的区域 (输入数字)${NC}"
     echo "  1) 香港 (cn-hongkong)"
     echo "  2) 新加坡 (ap-southeast-1)"
@@ -61,17 +76,14 @@ function get_single_user_json() {
         *) read -p "请输入 Region ID (如 cn-shanghai): " REGION ;;
     esac
 
-    echo -e "${CYAN}💡 提示: 如 RAM 用户授权到资源组，请输入资源组 ID，否则直接回车跳过${NC}"
-    read -p "资源组 ID (可选): " RESGROUP
-
     echo -e "${CYAN}💡 提示: 请前往 ECS 控制台 -> 实例列表 -> 实例 ID 列 (以 i- 开头)${NC}"
     read -p "ECS 实例 ID: " INSTANCE
     
     read -p "关机阈值 (GB, 默认180): " LIMIT
     LIMIT=${LIMIT:-180}
 
-    # 将构建好的 JSON 字符串赋值给全局变量
-    CURRENT_USER_JSON="{\"name\": \"$NAME\", \"ak\": \"$AK\", \"sk\": \"$SK\", \"region\": \"$REGION\", \"resgroup\": \"$RESGROUP\", \"instance_id\": \"$INSTANCE\", \"traffic_limit\": $LIMIT, \"quota\": 200}"
+    # 将构建好的 JSON 字符串赋值给全局变量 (去除了 resgroup，加入了 bill_endpoint 和 currency)
+    CURRENT_USER_JSON="{\"name\": \"$NAME\", \"ak\": \"$AK\", \"sk\": \"$SK\", \"region\": \"$REGION\", \"instance_id\": \"$INSTANCE\", \"traffic_limit\": $LIMIT, \"quota\": 200, \"bill_endpoint\": \"$BILL_ENDPOINT\", \"currency\": \"$CURRENCY\"}"
 }
 
 # 完整安装流程 (首次运行)
@@ -102,25 +114,48 @@ function run_full_install() {
 
     # 4. 下载源码
     echo -e "${YELLOW}>> 从 GitHub 下载最新脚本...${NC}"
-    wget -O "${TARGET_DIR}/monitor.py" "${REPO_URL}/monitor.py"
-    wget -O "${TARGET_DIR}/report.py" "${REPO_URL}/report.py"
+    wget -q -O "${TARGET_DIR}/monitor.py" "${REPO_URL}/monitor.py"
+    wget -q -O "${TARGET_DIR}/report.py" "${REPO_URL}/report.py"
 
     if [ ! -s "${TARGET_DIR}/monitor.py" ]; then
         echo -e "${RED}下载失败！请检查网络或 GitHub 地址是否正确。${NC}"
         exit 1
     fi
 
-    # 5. 交互式配置 Telegram
+    # 5. [核心修复环节] 使用 Python 动态修补下载下来的脚本
+    echo -e "${YELLOW}>> 正在挂载双端账单适配与网络寻址 Bug 修复补丁...${NC}"
+    python3 -c "
+import os
+files = ['${TARGET_DIR}/report.py', '${TARGET_DIR}/monitor.py']
+for file in files:
+    if not os.path.exists(file): continue
+    with open(file, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    # 修复 report.py 中的 CDT 请求卡死问题 (强制使用 cn-hangzhou 区域实例化客户端)
+    content = content.replace(\"do_common_request(client, 'cdt.aliyuncs.com'\", \"do_common_request(AcsClient(user['ak'].strip(), user['sk'].strip(), 'cn-hangzhou'), 'cdt.aliyuncs.com'\")
+    
+    # 修复 monitor.py 中的 CDT 请求卡死问题
+    content = content.replace(\"client.do_action_with_exception(req_cdt)\", \"AcsClient(user['ak'].strip(), user['sk'].strip(), 'cn-hangzhou').do_action_with_exception(req_cdt)\")
+
+    # 双端账单节点及货币单位动态适配
+    content = content.replace(\"'business.ap-southeast-1.aliyuncs.com'\", \"user.get('bill_endpoint', 'business.ap-southeast-1.aliyuncs.com')\")
+    content = content.replace('f\"${bill_amount:.2f}\"', 'f\"{user.get(\\'currency\\', \\'$\\' )}{bill_amount:.2f}\"')
+
+    with open(file, 'w', encoding='utf-8') as f:
+        f.write(content)
+"
+
+    # 6. 交互式配置 Telegram
     echo -e "\n${BLUE}### 配置 Telegram ###${NC}"
     echo -e "1. 联系 ${CYAN}@BotFather${NC} -> 创建机器人获取 Token"
     echo -e "2. 联系 ${CYAN}@userinfobot${NC} -> 获取您的 Chat ID"
     read -p "请输入 Telegram Bot Token: " TG_TOKEN
     read -p "请输入 Telegram Chat ID: " TG_ID
 
-    # 6. 配置阿里云对象
+    # 7. 配置阿里云对象
     USERS_JSON=""
     while true; do
-        # 调用函数，结果保存在 CURRENT_USER_JSON 中
         get_single_user_json
         
         if [ -z "$USERS_JSON" ]; then
@@ -136,7 +171,7 @@ function run_full_install() {
         fi
     done
 
-    # 7. 生成配置文件
+    # 8. 生成配置文件
     cat > "$CONFIG_FILE" <<EOF
 {
     "telegram": {
@@ -150,7 +185,7 @@ function run_full_install() {
 EOF
     echo -e "${GREEN}配置文件已生成: ${CONFIG_FILE}${NC}"
 
-    # 8. 设置 Crontab
+    # 9. 设置 Crontab
     echo -e "${YELLOW}>> 配置定时任务...${NC}"
     crontab -l > /tmp/cron_bk 2>/dev/null
     grep -v "aliyun_monitor" /tmp/cron_bk > /tmp/cron_clean
@@ -178,9 +213,7 @@ function run_manage_menu() {
 
         case $MENU_OPT in
             1)
-                # 调用函数，结果保存在 CURRENT_USER_JSON 中
                 get_single_user_json
-                # 使用 Python 追加 JSON 节点
                 python3 -c "
 import json
 with open('$CONFIG_FILE', 'r') as f:
@@ -193,7 +226,6 @@ with open('$CONFIG_FILE', 'w') as f:
                 ;;
             2)
                 echo -e "\n${BLUE}当前监控的实例列表：${NC}"
-                # 使用 Python 列出所有实例
                 python3 -c "
 import json
 with open('$CONFIG_FILE', 'r') as f:
@@ -209,7 +241,6 @@ else:
                 if [[ "$DEL_IDX" == "q" || -z "$DEL_IDX" ]]; then
                     continue
                 fi
-                # 使用 Python 删除对应节点
                 python3 -c "
 import json, sys
 idx = int('$DEL_IDX')
