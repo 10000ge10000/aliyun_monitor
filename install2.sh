@@ -12,7 +12,11 @@ fi
 
 # Ensure we are running in bash even when piped via sh
 if [ -z "${BASH_VERSION:-}" ]; then
-    exec /bin/bash "$0" "$@"
+    if [ -t 0 ]; then
+        exec /bin/bash "$0" "$@"
+    else
+        exec /bin/bash -s -- "$@"
+    fi
 fi
 
 set -e
