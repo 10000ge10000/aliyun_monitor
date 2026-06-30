@@ -146,8 +146,8 @@ def main():
             bill_data = do_common_request(client, 'business.aliyuncs.com', '2017-12-14', 'DescribeInstanceBill', bill_params, retries=1)
             if bill_data and bill_data.get('Success'):
                 items = bill_data.get('Data', {}).get('Items', [])
+                bill_amount = sum(float(item.get('PretaxAmount', 0)) for item in items)
                 if items:
-                    bill_amount = sum(float(item.get('PretaxAmount', 0)) for item in items)
                     bill_currency = items[0].get('Currency', 'USD')
 
             # 尝试2: 回退到 QueryBillOverview (国际站兼容)

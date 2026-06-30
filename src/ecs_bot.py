@@ -262,8 +262,7 @@ class AliCloudManager:
             response = self.client.do_action_with_exception(request)
             data = json.loads(response.decode("utf-8"))
             items = data.get("Data", {}).get("Items", [])
-            if items:
-                return sum(float(item.get("PretaxAmount", 0)) for item in items)
+            return sum(float(item.get("PretaxAmount", 0)) for item in items)
         except Exception as error:
             logger.info("查询实例账单失败，尝试账单总览 fallback: %s", error)
 
@@ -280,8 +279,7 @@ class AliCloudManager:
             response = self.client.do_action_with_exception(request)
             data = json.loads(response.decode("utf-8"))
             items = data.get("Data", {}).get("Items", {}).get("Item", [])
-            if items:
-                return sum(float(item.get("PretaxAmount", 0)) for item in items)
+            return sum(float(item.get("PretaxAmount", 0)) for item in items)
         except Exception as error:
             logger.warning("查询账单总览失败: %s", error)
         return None
