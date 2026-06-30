@@ -252,19 +252,39 @@ class AliCloudManager:
             logger.warning("查询 CDT 流量失败: %s", error)
             return None
 
-    def get_current_bill(self, instance_id: str) -> Optional[float]:
+    def get_current_bill(self, instance_id: str, bill_endpoint: str = "business.ap-southeast-1.aliyuncs.com") -> Optional[float]:
+        billing_cycle = datetime.now().strftime("%Y-%m")
         try:
             request = DescribeInstanceBillRequest.DescribeInstanceBillRequest()
-            request.set_BillingCycle(datetime.now().strftime("%Y-%m"))
+            request.set_BillingCycle(billing_cycle)
             request.set_InstanceID(instance_id)
             request.set_ProductCode("ecs")
             response = self.client.do_action_with_exception(request)
             data = json.loads(response.decode("utf-8"))
             items = data.get("Data", {}).get("Items", [])
-            return sum(float(item.get("PretaxAmount", 0)) for item in items)
+            if items:
+                return sum(float(item.get("PretaxAmount", 0)) for item in items)
         except Exception as error:
-            logger.warning("查询实例账单失败: %s", error)
-            return None
+            logger.info("查询实例账单失败，尝试账单总览 fallback: %s", error)
+
+        try:
+            request = CommonRequest()
+            request.set_domain(bill_endpoint)
+            request.set_version("2017-12-14")
+            request.set_action_name("QueryBillOverview")
+            request.set_method("POST")
+            request.set_protocol_type("https")
+            request.set_connect_timeout(5000)
+            request.set_read_timeout(15000)
+            request.add_query_param("BillingCycle", billing_cycle)
+            response = self.client.do_action_with_exception(request)
+            data = json.loads(response.decode("utf-8"))
+            items = data.get("Data", {}).get("Items", {}).get("Item", [])
+            if items:
+                return sum(float(item.get("PretaxAmount", 0)) for item in items)
+        except Exception as error:
+            logger.warning("查询账单总览失败: %s", error)
+        return None
 
 
 def build_manager(user_config: Dict) -> AliCloudManager:
@@ -490,7 +510,7 @@ async def operation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 selected,
                 detail,
                 manager.get_current_traffic(),
-                manager.get_current_bill(instance_id),
+                manager.get_current_bill(instance_id, selected.get("bill_endpoint", "business.ap-southeast-1.aliyuncs.com")),
             )
             await query.edit_message_text(message, parse_mode="Markdown")
     elif callback_data == "op_timer_menu":
@@ -706,7 +726,12 @@ async def send_status_for_config(update: Update, selected: Dict) -> None:
         await update.message.reply_text(f"查询实例 `{name}` 失败。", parse_mode="Markdown")
         return
     await update.message.reply_text(
-        format_status_message(selected, detail, manager.get_current_traffic(), manager.get_current_bill(selected["instance_id"])),
+        format_status_message(
+            selected,
+            detail,
+            manager.get_current_traffic(),
+            manager.get_current_bill(selected["instance_id"], selected.get("bill_endpoint", "business.ap-southeast-1.aliyuncs.com")),
+        ),
         parse_mode="Markdown",
     )
 
