@@ -34,6 +34,7 @@
 - 🔄 **自动恢复**：次月流量重置后自动开机恢复业务。
 - 📊 **多账号多地域**：同时监控任意组合（不同账号、不同区域、不同内外版实例）。
 - 📩 **Telegram 通知**：异常监控告警 + 每日图文并茂的汇总日报。
+- 🤖 **可选 Telegram 控制机器人**：通过管理员白名单远程查询状态、开机、关机、重启和设置定时开关机。
 
 ---
 
@@ -52,6 +53,7 @@
 ### 1️⃣ Telegram 通知参数
 - 创建机器人并获取 Token：[@BotFather](https://t.me/BotFather)
 - 获取您接收消息的 Chat ID：[@userinfobot](https://t.me/userinfobot)
+- 如需启用控制机器人，还需要获取允许操作 ECS 的 Telegram 用户 ID。注意：用户 ID 不等于群组 Chat ID。
 
 ### 2️⃣ 阿里云 RAM 权限设置
 为了安全起见，**强烈建议不要使用主账号**。请前往阿里云 RAM 访问控制台创建子用户并授予系统权限：
@@ -102,9 +104,41 @@ wget -qO- https://raw.githubusercontent.com/10000ge10000/aliyun_monitor/main/ins
 * 检测并修齐 Python 运行微环境与 Pip 依赖。
 * 拉取已深度解除底层网关 Bug 的执行组件。
 * 引导您录入 Telegram 配置、选择站别类型（人民币或美元账单）、输入并配置多个待监控账号。
+* 可选启用 Telegram 控制机器人，并配置允许远程操作 ECS 的管理员用户 ID。
 * 设置系统计划任务（Cron），按 **5分钟/次** 及每天早 9 点执行巡检与汇报。
 
 > 提示：如果日后需要增加、删除机器或刷新底层组件配置，只需再次运行该脚本命令即可进入智能管理面板。
+
+---
+
+## 🤖 Telegram 控制机器人（可选）
+
+安装脚本默认不会启用控制机器人。只有在首次安装或管理菜单中明确选择启用后，才会创建 `aliyun-ecs-bot.service`。
+
+启用后支持以下命令：
+
+```text
+/menu                     打开交互菜单
+/list                     查看实例列表
+/status <实例名或ID>       查询实例状态
+/start_instance <实例名或ID> 开机
+/stop <实例名或ID>         关机，需确认
+/reboot <实例名或ID>       重启，需确认
+/timers                   查看定时任务
+/help                     查看帮助
+```
+
+管理服务：
+
+```bash
+systemctl status aliyun-ecs-bot.service
+systemctl restart aliyun-ecs-bot.service
+systemctl stop aliyun-ecs-bot.service
+```
+
+也可以重新运行安装脚本进入管理菜单，选择 **Telegram 控制机器人管理**，进行启用、停用、查看状态或修改管理员 ID。
+
+> 注意：控制机器人具备远程开机、关机、重启 ECS 的能力。请务必使用 RAM 子账号和最小必要权限，并只把可信 Telegram 用户 ID 写入 `admin_users`。
 
 ---
 
@@ -122,7 +156,7 @@ wget -qO- https://raw.githubusercontent.com/10000ge10000/aliyun_monitor/main/ins
 
 ---
 
-## ��️ 卸载
+## 🗑️ 卸载
 
 ```bash
 wget -qO- https://raw.githubusercontent.com/10000ge10000/aliyun_monitor/main/uninstall.sh | sh

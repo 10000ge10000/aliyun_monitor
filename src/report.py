@@ -5,6 +5,8 @@ import os
 import json
 import datetime
 import requests
+import logging
+from logging.handlers import TimedRotatingFileHandler
 
 # 修正 urllib3 在 Python 3.12 下引发的 SNI 丢失问题
 try:
@@ -31,22 +33,39 @@ except ImportError:
     sys.exit(1)
 
 CONFIG_FILE = '/opt/scripts/config.json'
+LOG_FILE = '/opt/scripts/report.log'
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    handler = TimedRotatingFileHandler(LOG_FILE, when='D', interval=1, backupCount=7, encoding='utf-8')
+    handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    logger.addHandler(handler)
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    logger.addHandler(console_handler)
 
 def load_config():
     if not os.path.exists(CONFIG_FILE):
+        logger.error("配置文件不存在: %s", CONFIG_FILE)
         sys.exit(1)
     with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
         return json.load(f)
 
 def send_tg_report(tg_conf, message):
     if not tg_conf.get('bot_token') or not tg_conf.get('chat_id'):
+        logger.warning("Telegram 配置不完整，跳过日报发送")
         return
     try:
         url = f"https://api.telegram.org/bot{tg_conf['bot_token']}/sendMessage"
         data = {"chat_id": tg_conf['chat_id'], "text": message, "parse_mode": "Markdown"}
-        requests.post(url, json=data, timeout=10)
-    except:
-        pass
+        response = requests.post(url, json=data, timeout=10)
+        if response.status_code == 200:
+            logger.info("Telegram 日报发送成功")
+        else:
+            logger.error("Telegram 日报发送失败: HTTP %s, %s", response.status_code, response.text)
+    except Exception as e:
+        logger.exception("Telegram 日报发送异常: %s", e)
 
 def do_common_request(client, domain, version, action, params=None, method='POST', timeout=30, retries=3):
     for attempt in range(1, retries + 1):
@@ -65,14 +84,21 @@ def do_common_request(client, domain, version, action, params=None, method='POST
             response = client.do_action_with_exception(request)
             return json.loads(response.decode('utf-8'))
         except Exception as e:
+            logger.warning("请求 %s 失败 (尝试 %s/%s): %s", action, attempt, retries, e)
             if attempt < retries:
                 import time
                 time.sleep(2 * attempt)
                 continue
+            logger.error("请求 %s 最终失败，已重试 %s 次", action, retries)
             return None
 
 def main():
-    config = load_config()
+    try:
+        config = load_config()
+    except Exception as e:
+        logger.exception("加载配置失败: %s", e)
+        sys.exit(1)
+
     users = config.get('users', [])
     tg_conf = config.get('telegram', {})
     
@@ -88,6 +114,7 @@ def main():
             resgroup = user.get('resgroup', '').strip()
             if user.get('paused') or user.get('disabled'):
                 user_name = user.get('name', '').strip() or target_id or "Unknown_Device"
+                logger.info("[%s] 监控已暂停，日报仅标注暂停状态", user_name)
                 report_lines.append(
                     f"👤 *{user_name}* (暂停)\n"
                     f"   ⏸️ 监控: 已暂停\n"
@@ -167,7 +194,7 @@ def main():
             bill_limit = user.get('bill_threshold', 1.0)
             
             if traffic_gb >= 0:
-                percent = (traffic_gb / quota) * 100
+                percent = (traffic_gb / quota) * 100 if quota > 0 else 0
                 traffic_str = f"{traffic_gb:.2f} GB ({percent:.1f}%)"
             else:
                 percent = 0
@@ -199,9 +226,11 @@ def main():
                 f"   💰 账单: *{bill_str}*\n"
                 f"   📝 评价: {status_icon}\n"
             )
+            logger.info("用户 [%s] 日报详情:\n%s", user_name, user_report)
             report_lines.append(user_report)
 
         except Exception as e:
+            logger.exception("处理用户 %s 时出错: %s", user.get('name', 'Unknown'), e)
             report_lines.append(f"❌ *{user.get('name', 'Unknown')}* Error: {str(e)}\n")
 
     final_msg = "\n".join(report_lines)

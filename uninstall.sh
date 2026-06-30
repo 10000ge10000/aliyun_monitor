@@ -8,6 +8,8 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 TARGET_DIR="/opt/scripts"
+BOT_SERVICE_NAME="aliyun-ecs-bot.service"
+BOT_SERVICE_FILE="/etc/systemd/system/${BOT_SERVICE_NAME}"
 
 clear
 echo -e "${BLUE}=============================================================${NC}"
@@ -21,9 +23,10 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 echo -e "${RED}警告：此操作将执行以下清理：${NC}"
-echo -e "  1. 停止并移除相关的 Crontab 定时任务"
-echo -e "  2. 永久删除目录: ${TARGET_DIR} (包含配置、日志、虚拟环境)"
-echo -e "  3. 清理安装时产生的临时文件"
+echo -e "  1. 停止并移除 Telegram 控制机器人 systemd 服务（如已启用）"
+echo -e "  2. 停止并移除相关的 Crontab 定时任务"
+echo -e "  3. 永久删除目录: ${TARGET_DIR} (包含配置、日志、虚拟环境)"
+echo -e "  4. 清理安装时产生的临时文件"
 echo ""
 
 read -p "确认要执行卸载吗？(y/n): " CONFIRM
@@ -34,8 +37,23 @@ fi
 
 echo ""
 
-# 2. 清理 Crontab (安全模式)
-echo -e "${YELLOW}>> [1/3] 正在清理定时任务...${NC}"
+# 2. 清理 Bot systemd 服务
+echo -e "${YELLOW}>> [1/4] 正在清理 Telegram 控制机器人服务...${NC}"
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now "$BOT_SERVICE_NAME" >/dev/null 2>&1 || true
+    if [ -f "$BOT_SERVICE_FILE" ]; then
+        rm -f "$BOT_SERVICE_FILE"
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        echo -e "${GREEN}✓ 已移除 ${BOT_SERVICE_NAME}。${NC}"
+    else
+        echo -e "${GREEN}✓ 未发现 ${BOT_SERVICE_NAME} 服务文件，跳过。${NC}"
+    fi
+else
+    echo -e "${GREEN}✓ 当前系统无 systemctl，跳过 systemd 服务清理。${NC}"
+fi
+
+# 3. 清理 Crontab (安全模式)
+echo -e "${YELLOW}>> [2/4] 正在清理定时任务...${NC}"
 # 导出当前任务
 if crontab -l > /tmp/cron_backup 2>/dev/null; then
     # 检查是否存在相关任务
@@ -55,8 +73,8 @@ else
     echo -e "${GREEN}✓ 当前用户无 Crontab 任务，跳过。${NC}"
 fi
 
-# 3. 删除文件目录
-echo -e "${YELLOW}>> [2/3] 正在删除程序文件与数据...${NC}"
+# 4. 删除文件目录
+echo -e "${YELLOW}>> [3/4] 正在删除程序文件与数据...${NC}"
 if [ -d "$TARGET_DIR" ]; then
     # 彻底删除目录
     rm -rf "$TARGET_DIR"
@@ -69,8 +87,8 @@ else
     echo -e "${GREEN}✓ 目录不存在，跳过。${NC}"
 fi
 
-# 4. 清除下载痕迹 (可选)
-echo -e "${YELLOW}>> [3/3] 正在清理下载痕迹...${NC}"
+# 5. 清除下载痕迹 (可选)
+echo -e "${YELLOW}>> [4/4] 正在清理下载痕迹...${NC}"
 
 # 尝试删除当前目录下的 install.sh (如果存在)
 if [ -f "./install.sh" ]; then
