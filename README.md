@@ -172,6 +172,12 @@ wget -qO- https://raw.githubusercontent.com/10000ge10000/aliyun_monitor/main/uni
 
 ---
 
+## 🙏 致谢
+
+感谢 [@alatter](https://github.com/alatter) 在 [PR #6](https://github.com/10000ge10000/aliyun_monitor/pull/6) 中提供 Telegram ECS 控制机器人思路与原型，实现方向包括实例状态查询、远程开关机/重启、定时任务和机器人交互菜单。本项目已在当前 `src/` 结构中选择性吸收并完善相关能力。
+
+---
+
 ## ⭐ 欢迎 Star 支持
 
 如果这个项目帮您梳理了多节点的部署或者成功避免了一次“破产”，欢迎点个 ⭐！你的支持是我们持续维护的动力 🙏
