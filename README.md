@@ -110,6 +110,8 @@ wget -qO- https://raw.githubusercontent.com/10000ge10000/aliyun_monitor/main/ins
 
 > 提示：如果日后需要增加、删除机器或刷新底层组件配置，只需再次运行该脚本命令即可进入智能管理面板。
 
+> 提示：国内站（CNY 结算）账号的扣费预警阈值默认按 1 USD ≈ 7.0 CNY 折算，如需自定义汇率，可在 `config.json` 对应实例配置中添加 `"usd_cny_rate": 7.2` 字段。
+
 ---
 
 ## 🤖 Telegram 控制机器人（可选）
