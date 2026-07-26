@@ -117,6 +117,41 @@ def send_tg_alert(tg_conf, title, message, color_status):
     except Exception as e:
         logger.error(f"TG发送失败: {e}")
 
+def get_balance_line(user):
+    """查询账户可用余额，返回告警消息中的"当前余额"行；失败返回空字符串，不影响告警发送"""
+    endpoints = [user.get('bill_endpoint', 'business.ap-southeast-1.aliyuncs.com')]
+    for candidate in ('business.aliyuncs.com', 'business.ap-southeast-1.aliyuncs.com'):
+        if candidate not in endpoints:
+            endpoints.append(candidate)
+    client = AcsClient(user['ak'], user['sk'], user['region'])
+    for endpoint in endpoints:
+        try:
+            req = CommonRequest()
+            req.set_domain(endpoint)
+            req.set_version('2017-12-14')
+            req.set_action_name('QueryAccountBalance')
+            req.set_method('POST')
+            req.set_protocol_type('https')
+            req.set_connect_timeout(5000)
+            req.set_read_timeout(15000)
+            data = json.loads(client.do_action_with_exception(req).decode('utf-8'))
+            if not data.get('Success'):
+                continue
+            info = data.get('Data') or {}
+            raw_amount = info.get('AvailableAmount')
+            if raw_amount is None:
+                continue
+            # 金额可能带千分位逗号，如 "1,234.56"
+            amount = float(str(raw_amount).replace(',', ''))
+            symbol = {'CNY': '¥', 'USD': '$'}.get(info.get('Currency') or '', user.get('currency', '$'))
+            line = f"\n当前余额: {symbol}{amount:.2f}"
+            if amount < 0:
+                line += " ⚠️"
+            return line
+        except Exception as e:
+            logger.warning(f"查询账户余额失败({endpoint}): {e}")
+    return ""
+
 # ---------- 查询实例状态 ----------
 
 def get_instance_status(client, instance_id):
@@ -200,7 +235,8 @@ def check_and_act(user, tg_conf, state):
                     logger.warning(f"[{name}] StartInstance API 调用失败: {err_msg}，"
                                    f"累计失败 {new_failures} 次")
                     if can_notify(state, instance_id, 'start_failed'):
-                        msg = (f"机器: {name}\n当前流量: {curr_gb:.2f}GB\n"
+                        balance_line = get_balance_line(user)
+                        msg = (f"机器: {name}\n当前流量: {curr_gb:.2f}GB{balance_line}\n"
                                f"⚠️ 启动 API 调用失败: {err_msg}\n"
                                f"累计失败 {new_failures} 次，"
                                f"脚本将每 {RESOURCE_RETRY_COOLDOWN//60} 分钟自动重试。")
@@ -234,7 +270,8 @@ def check_and_act(user, tg_conf, state):
                     state.setdefault(instance_id, {}).pop('last_retry_ts', None)
                     logger.info(f"[{name}] 实例已恢复运行 ✅")
                     if can_notify(state, instance_id, 'resumed'):
-                        msg = f"机器: {name}\n当前流量: {curr_gb:.2f}GB\n动作: 恢复运行 ✅"
+                        balance_line = get_balance_line(user)
+                        msg = f"机器: {name}\n当前流量: {curr_gb:.2f}GB{balance_line}\n动作: 恢复运行 ✅"
                         send_tg_alert(tg_conf, "恢复监控", msg, "green")
                         mark_notified(state, instance_id, 'resumed')
                 else:
@@ -243,7 +280,8 @@ def check_and_act(user, tg_conf, state):
                     set_start_failures(state, instance_id, new_failures)
                     logger.warning(f"[{name}] 启动超时或被拒绝，累计失败 {new_failures} 次")
                     if can_notify(state, instance_id, 'start_failed'):
-                        msg = (f"机器: {name}\n当前流量: {curr_gb:.2f}GB\n"
+                        balance_line = get_balance_line(user)
+                        msg = (f"机器: {name}\n当前流量: {curr_gb:.2f}GB{balance_line}\n"
                                f"⚠️ 尝试启动但 {START_WAIT_TIMEOUT}s 内未变为 Running 状态，"
                                f"累计失败 {new_failures} 次。\n"
                                f"脚本将每 {RESOURCE_RETRY_COOLDOWN//60} 分钟自动重试，无需手动干预。")
@@ -266,14 +304,16 @@ def check_and_act(user, tg_conf, state):
                 stop_req.set_InstanceId(instance_id)
                 client.do_action_with_exception(stop_req)
                 if can_notify(state, instance_id, 'overlimit', OVERLIMIT_COOLDOWN):
-                    msg = f"机器: {name}\n当前流量: {curr_gb:.2f}GB\n动作: 已触发止损关机 \U0001f6d1"
+                    balance_line = get_balance_line(user)
+                    msg = f"机器: {name}\n当前流量: {curr_gb:.2f}GB{balance_line}\n动作: 已触发止损关机 \U0001f6d1"
                     send_tg_alert(tg_conf, "流量预警", msg, "red")
                     mark_notified(state, instance_id, 'overlimit')
             else:
                 # 已处于停止状态，每天提醒一次
                 logger.info(f"[{name}] 已停止止损 - {curr_gb:.2f}GB")
                 if can_notify(state, instance_id, 'overlimit', OVERLIMIT_COOLDOWN):
-                    msg = f"机器: {name}\n当前流量: {curr_gb:.2f}GB\n状态: 流量超标，已保持关机 \U0001f6d1"
+                    balance_line = get_balance_line(user)
+                    msg = f"机器: {name}\n当前流量: {curr_gb:.2f}GB{balance_line}\n状态: 流量超标，已保持关机 \U0001f6d1"
                     send_tg_alert(tg_conf, "流量超标提醒", msg, "red")
                     mark_notified(state, instance_id, 'overlimit')
 

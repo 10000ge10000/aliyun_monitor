@@ -284,12 +284,49 @@ class AliCloudManager:
             logger.warning("查询账单总览失败: %s", error)
         return None
 
+    def get_account_balance(self, bill_endpoint: str = "business.ap-southeast-1.aliyuncs.com") -> Optional[Tuple[float, str]]:
+        """查询账户可用余额 (QueryAccountBalance)。返回 (金额, 货币代码)；失败返回 None。"""
+        endpoints = [bill_endpoint]
+        for candidate in ("business.aliyuncs.com", "business.ap-southeast-1.aliyuncs.com"):
+            if candidate not in endpoints:
+                endpoints.append(candidate)
+        for endpoint in endpoints:
+            try:
+                request = CommonRequest()
+                request.set_domain(endpoint)
+                request.set_version("2017-12-14")
+                request.set_action_name("QueryAccountBalance")
+                request.set_method("POST")
+                request.set_protocol_type("https")
+                request.set_connect_timeout(5000)
+                request.set_read_timeout(15000)
+                response = self.client.do_action_with_exception(request)
+                data = json.loads(response.decode("utf-8"))
+                if not data.get("Success"):
+                    continue
+                info = data.get("Data") or {}
+                raw_amount = info.get("AvailableAmount")
+                if raw_amount is None:
+                    continue
+                # 金额可能带千分位逗号，如 "1,234.56"
+                amount = float(str(raw_amount).replace(",", ""))
+                return amount, info.get("Currency") or ""
+            except Exception as error:
+                logger.warning("查询账户余额失败 (%s): %s", endpoint, error)
+        return None
+
 
 def build_manager(user_config: Dict) -> AliCloudManager:
     return AliCloudManager(user_config["ak"], user_config["sk"], user_config["region"])
 
 
-def format_status_message(user_config: Dict, detail: Dict, traffic: Optional[float], bill: Optional[float]) -> str:
+def format_status_message(
+    user_config: Dict,
+    detail: Dict,
+    traffic: Optional[float],
+    bill: Optional[float],
+    balance: Optional[Tuple[float, str]],
+) -> str:
     name = get_user_friendly_name(user_config)
     quota = user_config.get("traffic_limit", 180)
     bill_threshold = user_config.get("bill_threshold", 1.0)
@@ -310,6 +347,15 @@ def format_status_message(user_config: Dict, detail: Dict, traffic: Optional[flo
         bill_text = f"{currency}{bill:.2f}"
         evaluation = "💸 扣费预警" if bill > bill_threshold else "✅"
 
+    if balance is None:
+        balance_text = "⚠️ 查询失败"
+    else:
+        balance_amount, balance_currency = balance
+        symbol = {"CNY": "¥", "USD": "$"}.get(balance_currency, currency)
+        balance_text = f"{symbol}{balance_amount:.2f}"
+        if balance_amount < 0:
+            balance_text += " ⚠️ 欠费"
+
     return (
         f"📅 时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
         f"👤 实例: *{name}* ({detail.get('spec')})\n"
@@ -317,6 +363,7 @@ def format_status_message(user_config: Dict, detail: Dict, traffic: Optional[flo
         f"🌐 IP: `{detail.get('ip')}`\n"
         f"📉 流量: {traffic_text}\n"
         f"💰 账单: {bill_text}\n"
+        f"💳 余额: {balance_text}\n"
         f"📝 评价: {evaluation}"
     )
 
@@ -504,11 +551,13 @@ async def operation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not detail:
             await query.edit_message_text(f"查询实例 `{name}` 失败。", parse_mode="Markdown")
         else:
+            bill_endpoint = selected.get("bill_endpoint", "business.ap-southeast-1.aliyuncs.com")
             message = format_status_message(
                 selected,
                 detail,
                 manager.get_current_traffic(),
-                manager.get_current_bill(instance_id, selected.get("bill_endpoint", "business.ap-southeast-1.aliyuncs.com")),
+                manager.get_current_bill(instance_id, bill_endpoint),
+                manager.get_account_balance(bill_endpoint),
             )
             await query.edit_message_text(message, parse_mode="Markdown")
     elif callback_data == "op_timer_menu":
@@ -723,12 +772,14 @@ async def send_status_for_config(update: Update, selected: Dict) -> None:
     if not detail:
         await update.message.reply_text(f"查询实例 `{name}` 失败。", parse_mode="Markdown")
         return
+    bill_endpoint = selected.get("bill_endpoint", "business.ap-southeast-1.aliyuncs.com")
     await update.message.reply_text(
         format_status_message(
             selected,
             detail,
             manager.get_current_traffic(),
-            manager.get_current_bill(selected["instance_id"], selected.get("bill_endpoint", "business.ap-southeast-1.aliyuncs.com")),
+            manager.get_current_bill(selected["instance_id"], bill_endpoint),
+            manager.get_account_balance(bill_endpoint),
         ),
         parse_mode="Markdown",
     )

@@ -92,6 +92,31 @@ def do_common_request(client, domain, version, action, params=None, method='POST
             logger.error("请求 %s 最终失败，已重试 %s 次", action, retries)
             return None
 
+BALANCE_ENDPOINTS = ('business.aliyuncs.com', 'business.ap-southeast-1.aliyuncs.com')
+
+def currency_symbol(code, default='$'):
+    return {'CNY': '¥', 'USD': '$'}.get(code, default)
+
+def get_account_balance(client, bill_endpoint):
+    """查询账户可用余额 (QueryAccountBalance)。返回 (金额, 货币代码)；查询失败返回 (None, None)。"""
+    # 优先使用该账号配置的账单节点，失败后尝试另一节点，兼容国内/国际站配置错误的情况
+    endpoints = [bill_endpoint] + [ep for ep in BALANCE_ENDPOINTS if ep != bill_endpoint]
+    for endpoint in endpoints:
+        data = do_common_request(client, endpoint, '2017-12-14', 'QueryAccountBalance', retries=1)
+        if not data or not data.get('Success'):
+            continue
+        info = data.get('Data') or {}
+        raw_amount = info.get('AvailableAmount')
+        if raw_amount is None:
+            continue
+        try:
+            # 金额可能带千分位逗号，如 "1,234.56"
+            amount = float(str(raw_amount).replace(',', ''))
+        except ValueError:
+            continue
+        return amount, info.get('Currency') or ''
+    return None, None
+
 def main():
     try:
         config = load_config()
@@ -103,6 +128,7 @@ def main():
     tg_conf = config.get('telegram', {})
     
     report_lines = []
+    balance_cache = {}  # 同一账号(AK)的余额只查询一次
     today = datetime.datetime.now().strftime("%Y-%m-%d")
     report_lines.append(f"📊 *[阿里云多账号 - 每日财报]*")
     report_lines.append(f"📅 日期: {today}\n")
@@ -112,6 +138,7 @@ def main():
             target_id = user.get('instance_id', '').strip()
             target_region = user.get('region', '').strip()
             resgroup = user.get('resgroup', '').strip()
+            bill_endpoint = (user.get('bill_endpoint') or 'business.ap-southeast-1.aliyuncs.com').strip()
             if user.get('paused') or user.get('disabled'):
                 user_name = user.get('name', '').strip() or target_id or "Unknown_Device"
                 logger.info("[%s] 监控已暂停，日报仅标注暂停状态", user_name)
@@ -153,13 +180,20 @@ def main():
             # 尝试2: 回退到 QueryBillOverview (国际站兼容)
             if bill_amount == -1:
                 bill_params2 = {'BillingCycle': datetime.datetime.now().strftime("%Y-%m")}
-                bill_endpoint = user.get('bill_endpoint', 'business.ap-southeast-1.aliyuncs.com')
                 bill_data2 = do_common_request(client, bill_endpoint, '2017-12-14', 'QueryBillOverview', bill_params2)
                 if bill_data2:
                     items2 = bill_data2.get('Data', {}).get('Items', {}).get('Item', [])
                     bill_amount = sum(float(item.get('PretaxAmount', 0)) for item in items2)
                     if items2:
                         bill_currency = items2[0].get('Currency', 'USD')
+
+            # 2.5 账户可用余额 (同账号多实例复用缓存，避免重复请求)
+            ak_key = user['ak'].strip()
+            if ak_key in balance_cache:
+                balance_amount, balance_currency = balance_cache[ak_key]
+            else:
+                balance_amount, balance_currency = get_account_balance(client, bill_endpoint)
+                balance_cache[ak_key] = (balance_amount, balance_currency)
 
             # 3. ECS 状态
             ecs_params = {'PageSize': 50, 'RegionId': target_region}
@@ -206,8 +240,14 @@ def main():
                 bill_limit = bill_limit * 7.0  # USD 阈值换算为 CNY
             elif bill_amount != -1:
                 # 覆盖货币符号（支持根据配置动态显示）
-                currency_symbol = user.get('currency', '$')
-                bill_str = f"{currency_symbol}{bill_amount:.2f}"
+                bill_str = f"{user.get('currency', '$')}{bill_amount:.2f}"
+
+            if balance_amount is not None:
+                balance_str = f"{currency_symbol(balance_currency, user.get('currency') or '$')}{balance_amount:.2f}"
+                if balance_amount < 0:
+                    balance_str += " ⚠️ 欠费"
+            else:
+                balance_str = "⚠️ 查询失败"
 
             status_icon = "✅"
             if traffic_gb >= 0 and traffic_gb > quota: status_icon = "⚠️ 流量超标"
@@ -224,6 +264,7 @@ def main():
                 f"   🌐 IP: `{ip}`\n"
                 f"   📉 流量: {traffic_str}\n"
                 f"   💰 账单: *{bill_str}*\n"
+                f"   💳 余额: *{balance_str}*\n"
                 f"   📝 评价: {status_icon}\n"
             )
             logger.info("用户 [%s] 日报详情:\n%s", user_name, user_report)
