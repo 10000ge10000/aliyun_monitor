@@ -125,6 +125,14 @@ def get_user_friendly_name(user_config: Dict) -> str:
     return user_config.get("name") or user_config.get("instance_id") or "Unknown"
 
 
+def sanitize_markdown(text) -> str:
+    """将 legacy Markdown 特殊字符替换为空格，避免实例名/错误信息中的特殊字符导致消息发送失败"""
+    text = str(text)
+    for ch in ("_", "*", "`", "["):
+        text = text.replace(ch, " ")
+    return text.strip()
+
+
 def find_user_config(identifier: str) -> Optional[Dict]:
     for user_config in load_user_configs():
         if user_config.get("name") == identifier or user_config.get("instance_id") == identifier:
@@ -184,6 +192,7 @@ class AliCloudManager:
 
     def get_instance_detail(self, instance_id: str) -> Optional[Dict]:
         request = DescribeInstancesRequest()
+        request.set_protocol_type("https")
         request.set_InstanceIds(json.dumps([instance_id]))
         data = self._do_request(request)
         instances = (data or {}).get("Instances", {}).get("Instance", [])
@@ -208,6 +217,7 @@ class AliCloudManager:
     def start_instance(self, instance_id: str) -> Tuple[bool, str]:
         try:
             request = StartInstanceRequest()
+            request.set_protocol_type("https")
             request.set_InstanceId(instance_id)
             self.client.do_action_with_exception(request)
             return True, "启动命令已发送"
@@ -217,6 +227,7 @@ class AliCloudManager:
     def stop_instance(self, instance_id: str, force: bool = False) -> Tuple[bool, str]:
         try:
             request = StopInstanceRequest()
+            request.set_protocol_type("https")
             request.set_InstanceId(instance_id)
             request.set_ForceStop(force)
             self.client.do_action_with_exception(request)
@@ -227,6 +238,7 @@ class AliCloudManager:
     def reboot_instance(self, instance_id: str, force: bool = False) -> Tuple[bool, str]:
         try:
             request = RebootInstanceRequest()
+            request.set_protocol_type("https")
             request.set_InstanceId(instance_id)
             request.set_ForceStop(force)
             self.client.do_action_with_exception(request)
@@ -242,6 +254,7 @@ class AliCloudManager:
             request.set_version("2021-08-13")
             request.set_action_name("ListCdtInternetTraffic")
             request.set_method("POST")
+            request.set_protocol_type("https")
             request.set_connect_timeout(5000)
             request.set_read_timeout(15000)
             response = client.do_action_with_exception(request)
@@ -256,6 +269,7 @@ class AliCloudManager:
         billing_cycle = datetime.now().strftime("%Y-%m")
         try:
             request = DescribeInstanceBillRequest.DescribeInstanceBillRequest()
+            request.set_protocol_type("https")
             request.set_BillingCycle(billing_cycle)
             request.set_InstanceID(instance_id)
             request.set_ProductCode("ecs")
@@ -358,7 +372,7 @@ def format_status_message(
 
     return (
         f"📅 时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
-        f"👤 实例: *{name}* ({detail.get('spec')})\n"
+        f"👤 实例: *{sanitize_markdown(name)}* ({detail.get('spec')})\n"
         f"🖥️ 状态: {status_icon} {detail.get('status')}\n"
         f"🌐 IP: `{detail.get('ip')}`\n"
         f"📉 流量: {traffic_text}\n"
@@ -366,6 +380,25 @@ def format_status_message(
         f"💳 余额: {balance_text}\n"
         f"📝 评价: {evaluation}"
     )
+
+
+async def collect_status_message(manager: AliCloudManager, selected: Dict) -> Optional[str]:
+    """在线程池中执行全部阻塞的状态查询（含重试等待），避免卡住 bot 事件循环"""
+
+    def _collect() -> Optional[str]:
+        detail = manager.get_instance_detail(selected["instance_id"])
+        if not detail:
+            return None
+        bill_endpoint = selected.get("bill_endpoint", "business.ap-southeast-1.aliyuncs.com")
+        return format_status_message(
+            selected,
+            detail,
+            manager.get_current_traffic(),
+            manager.get_current_bill(selected["instance_id"], bill_endpoint),
+            manager.get_account_balance(bill_endpoint),
+        )
+
+    return await asyncio.to_thread(_collect)
 
 
 def operation_keyboard() -> InlineKeyboardMarkup:
@@ -426,11 +459,10 @@ async def run_timer_action(context: ContextTypes.DEFAULT_TYPE, action: str) -> N
     data = context.job.data
     manager = AliCloudManager(data["ak"], data["sk"], data["region"])
     name = data.get("name", data["inst_id"])
-    ok, message = (
-        manager.start_instance(data["inst_id"])
-        if action == "start"
-        else manager.stop_instance(data["inst_id"], force=False)
-    )
+    if action == "start":
+        ok, message = await asyncio.to_thread(manager.start_instance, data["inst_id"])
+    else:
+        ok, message = await asyncio.to_thread(manager.stop_instance, data["inst_id"])
     logger.info("定时%s %s: %s, %s", "开机" if action == "start" else "关机", data["inst_id"], ok, message)
 
     config = load_config()
@@ -439,7 +471,7 @@ async def run_timer_action(context: ContextTypes.DEFAULT_TYPE, action: str) -> N
         action_text = "开机" if action == "start" else "关机"
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"⏰ 定时任务执行\n实例: `{name}`\n操作: {action_text}\n结果: {message}",
+            text=f"⏰ 定时任务执行\n实例: `{sanitize_markdown(name)}`\n操作: {action_text}\n结果: {sanitize_markdown(message)}",
             parse_mode="Markdown",
         )
 
@@ -491,7 +523,7 @@ async def instance_selection(update: Update, context: ContextTypes.DEFAULT_TYPE)
     selected = users[index]
     context.user_data["selected_config"] = selected
     await query.edit_message_text(
-        f"已选择: *{get_user_friendly_name(selected)}*",
+        f"已选择: *{sanitize_markdown(get_user_friendly_name(selected))}*",
         reply_markup=operation_keyboard(),
         parse_mode="Markdown",
     )
@@ -517,7 +549,7 @@ async def operation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if callback_data == "op_start":
         await query.edit_message_text(f"正在启动 {name}...")
-        ok, message = manager.start_instance(instance_id)
+        ok, message = await asyncio.to_thread(manager.start_instance, instance_id)
         await query.edit_message_text(f"{'成功' if ok else '失败'}: {name}\n{message}")
     elif callback_data == "op_stop":
         keyboard = InlineKeyboardMarkup(
@@ -530,7 +562,7 @@ async def operation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return SELECTING_OPERATION
     elif callback_data == "confirm_stop":
         await query.edit_message_text(f"正在停止 {name}...")
-        ok, message = manager.stop_instance(instance_id)
+        ok, message = await asyncio.to_thread(manager.stop_instance, instance_id)
         await query.edit_message_text(f"{'成功' if ok else '失败'}: {name}\n{message}")
     elif callback_data == "op_reboot":
         keyboard = InlineKeyboardMarkup(
@@ -543,22 +575,14 @@ async def operation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return SELECTING_OPERATION
     elif callback_data == "confirm_reboot":
         await query.edit_message_text(f"正在重启 {name}...")
-        ok, message = manager.reboot_instance(instance_id)
+        ok, message = await asyncio.to_thread(manager.reboot_instance, instance_id)
         await query.edit_message_text(f"{'成功' if ok else '失败'}: {name}\n{message}")
     elif callback_data == "op_status":
-        await query.edit_message_text(f"正在查询 `{name}` 状态...", parse_mode="Markdown")
-        detail = manager.get_instance_detail(instance_id)
-        if not detail:
-            await query.edit_message_text(f"查询实例 `{name}` 失败。", parse_mode="Markdown")
+        await query.edit_message_text(f"正在查询 `{sanitize_markdown(name)}` 状态...", parse_mode="Markdown")
+        message = await collect_status_message(manager, selected)
+        if not message:
+            await query.edit_message_text(f"查询实例 `{sanitize_markdown(name)}` 失败。", parse_mode="Markdown")
         else:
-            bill_endpoint = selected.get("bill_endpoint", "business.ap-southeast-1.aliyuncs.com")
-            message = format_status_message(
-                selected,
-                detail,
-                manager.get_current_traffic(),
-                manager.get_current_bill(instance_id, bill_endpoint),
-                manager.get_account_balance(bill_endpoint),
-            )
             await query.edit_message_text(message, parse_mode="Markdown")
     elif callback_data == "op_timer_menu":
         keyboard = InlineKeyboardMarkup(
@@ -581,7 +605,7 @@ async def operation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("请选择实例:", reply_markup=InlineKeyboardMarkup(keyboard))
         return SELECTING_INSTANCE
     elif callback_data == "back_to_operation":
-        await query.edit_message_text(f"已选择: *{name}*", reply_markup=operation_keyboard(), parse_mode="Markdown")
+        await query.edit_message_text(f"已选择: *{sanitize_markdown(name)}*", reply_markup=operation_keyboard(), parse_mode="Markdown")
         return SELECTING_OPERATION
     elif callback_data == "cancel_operation":
         await query.edit_message_text("已取消。")
@@ -630,7 +654,7 @@ async def timer_type_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if callback_data == "back_to_operation":
         await query.edit_message_text(
-            f"已选择: *{get_user_friendly_name(selected)}*",
+            f"已选择: *{sanitize_markdown(get_user_friendly_name(selected))}*",
             reply_markup=operation_keyboard(),
             parse_mode="Markdown",
         )
@@ -767,22 +791,12 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def send_status_for_config(update: Update, selected: Dict) -> None:
     name = get_user_friendly_name(selected)
     manager = build_manager(selected)
-    await update.message.reply_text(f"正在查询 `{name}` 状态...", parse_mode="Markdown")
-    detail = manager.get_instance_detail(selected["instance_id"])
-    if not detail:
-        await update.message.reply_text(f"查询实例 `{name}` 失败。", parse_mode="Markdown")
+    await update.message.reply_text(f"正在查询 `{sanitize_markdown(name)}` 状态...", parse_mode="Markdown")
+    message = await collect_status_message(manager, selected)
+    if not message:
+        await update.message.reply_text(f"查询实例 `{sanitize_markdown(name)}` 失败。", parse_mode="Markdown")
         return
-    bill_endpoint = selected.get("bill_endpoint", "business.ap-southeast-1.aliyuncs.com")
-    await update.message.reply_text(
-        format_status_message(
-            selected,
-            detail,
-            manager.get_current_traffic(),
-            manager.get_current_bill(selected["instance_id"], bill_endpoint),
-            manager.get_account_balance(bill_endpoint),
-        ),
-        parse_mode="Markdown",
-    )
+    await update.message.reply_text(message, parse_mode="Markdown")
 
 
 async def start_instance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -816,7 +830,7 @@ async def run_instance_command(update: Update, context: ContextTypes.DEFAULT_TYP
     name = get_user_friendly_name(selected)
     if action == "start":
         await update.message.reply_text(f"正在启动 {name}...")
-        ok, message = manager.start_instance(instance_id)
+        ok, message = await asyncio.to_thread(manager.start_instance, instance_id)
     elif action in ("stop", "reboot"):
         context.user_data["direct_operation"] = {"action": action, "instance_id": instance_id}
         action_text = "关机" if action == "stop" else "重启"
@@ -860,10 +874,10 @@ async def direct_operation_confirm(update: Update, context: ContextTypes.DEFAULT
     name = get_user_friendly_name(selected)
     if pending.get("action") == "stop":
         await query.edit_message_text(f"正在停止 {name}...")
-        ok, message = manager.stop_instance(selected["instance_id"])
+        ok, message = await asyncio.to_thread(manager.stop_instance, selected["instance_id"])
     elif pending.get("action") == "reboot":
         await query.edit_message_text(f"正在重启 {name}...")
-        ok, message = manager.reboot_instance(selected["instance_id"])
+        ok, message = await asyncio.to_thread(manager.reboot_instance, selected["instance_id"])
     else:
         ok, message = False, "无效操作"
     context.user_data.pop("direct_operation", None)

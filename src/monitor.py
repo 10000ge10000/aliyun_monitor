@@ -5,6 +5,10 @@ import logging
 import os
 import time
 import requests
+try:
+    import fcntl  # Linux 文件锁，防止 cron 并发运行；非 Linux 环境降级为不加锁
+except ImportError:
+    fcntl = None
 from logging.handlers import TimedRotatingFileHandler
 from aliyunsdkcore.client import AcsClient
 from aliyunsdkcore.request import CommonRequest
@@ -36,6 +40,8 @@ CONFIG_FILE = '/opt/scripts/config.json'
 LOG_FILE    = '/opt/scripts/monitor.log'
 # 状态缓存文件：记录每个实例上次发送通知的时间戳 / 启动失败次数
 STATE_FILE  = '/opt/scripts/monitor_state.json'
+# 运行锁文件：避免上一轮巡检未结束时 cron 再次并发启动导致状态互相覆盖
+LOCK_FILE   = '/opt/scripts/monitor.lock'
 
 # 通用事件通知冷却时间（秒）：1 小时内不重复发送
 NOTIFY_COOLDOWN = 3600
@@ -48,6 +54,8 @@ START_POLL_INTERVAL = 10
 MAX_START_FAILURES = 3
 # 资源不足时的重试冷却时间（秒）：30 分钟重试一次，而不是彻底放弃
 RESOURCE_RETRY_COOLDOWN = 1800
+# 连续巡检失败达到此次数后，发送"监控失明"告警提醒人工介入
+CHECK_FAILURE_ALERT_THRESHOLD = 3
 
 # 初始化日志
 logger = logging.getLogger(__name__)
@@ -105,17 +113,34 @@ def reset_start_failures(state, instance_id):
 
 # ---------- TG 通知 ----------
 
+def sanitize_markdown(text):
+    """将 legacy Markdown 特殊字符替换为空格，避免实例名/错误信息中的特殊字符导致 Telegram 解析失败"""
+    text = str(text)
+    for ch in ('_', '*', '`', '['):
+        text = text.replace(ch, ' ')
+    return text.strip()
+
 def send_tg_alert(tg_conf, title, message, color_status):
+    """发送 TG 告警。返回 True 表示发送成功，调用方据此决定是否进入通知冷却期"""
     if not tg_conf.get('bot_token') or not tg_conf.get('chat_id'):
-        return
+        return False
     icon = "\u2705" if color_status == "green" else "\U0001f6a8"
-    try:
-        url = f"https://api.telegram.org/bot{tg_conf['bot_token']}/sendMessage"
-        text = f"{icon} *[{title}]*\n\n{message}"
-        data = {"chat_id": tg_conf['chat_id'], "text": text, "parse_mode": "Markdown"}
-        requests.post(url, json=data, timeout=5)
-    except Exception as e:
-        logger.error(f"TG发送失败: {e}")
+    url = f"https://api.telegram.org/bot{tg_conf['bot_token']}/sendMessage"
+    text = f"{icon} *[{title}]*\n\n{message}"
+    payloads = [
+        {"chat_id": tg_conf['chat_id'], "text": text, "parse_mode": "Markdown"},
+        # Markdown 解析失败或网络抖动时，退化为纯文本再试一次，保证告警必达
+        {"chat_id": tg_conf['chat_id'], "text": text},
+    ]
+    for data in payloads:
+        try:
+            resp = requests.post(url, json=data, timeout=10)
+            if resp.status_code == 200:
+                return True
+            logger.error(f"TG发送失败: HTTP {resp.status_code}, {resp.text}")
+        except Exception as e:
+            logger.error(f"TG发送失败: {e}")
+    return False
 
 def get_balance_line(user):
     """查询账户可用余额，返回告警消息中的"当前余额"行；失败返回空字符串，不影响告警发送"""
@@ -156,6 +181,7 @@ def get_balance_line(user):
 
 def get_instance_status(client, instance_id):
     req_ecs = DescribeInstancesRequest()
+    req_ecs.set_protocol_type('https')
     req_ecs.set_InstanceIds(json.dumps([instance_id]))
     resp_ecs = client.do_action_with_exception(req_ecs)
     data_ecs = json.loads(resp_ecs.decode('utf-8'))
@@ -181,6 +207,7 @@ def check_and_act(user, tg_conf, state):
         req_traffic.set_version('2021-08-13')
         req_traffic.set_action_name('ListCdtInternetTraffic')
         req_traffic.set_method('POST')
+        req_traffic.set_protocol_type('https')
         req_traffic.set_connect_timeout(5000)   # 连接 5 秒内必须成功，避免黑洞 IP 卡死
         req_traffic.set_read_timeout(15000)      # 读取 15 秒
         # CDT 流量查询强制使用 cn-hangzhou client 避免某些地域导致卡死
@@ -195,6 +222,9 @@ def check_and_act(user, tg_conf, state):
         if status is None:
             logger.error(f"[{name}] 未找到实例: {instance_id}")
             return
+
+        # 流量与状态均查询成功，重置连续巡检失败计数
+        state.setdefault(instance_id, {}).pop('check_failures', None)
 
         # 3. 决策
         limit = user.get('traffic_limit', 180)
@@ -225,6 +255,7 @@ def check_and_act(user, tg_conf, state):
                 # --- 调用启动 API（单独 try-except 防止异常跳过计数） ---
                 try:
                     start_req = StartInstanceRequest()
+                    start_req.set_protocol_type('https')
                     start_req.set_InstanceId(instance_id)
                     client.do_action_with_exception(start_req)
                     logger.info(f"[{name}] StartInstance API 调用成功，等待实例进入 Running...")
@@ -236,12 +267,12 @@ def check_and_act(user, tg_conf, state):
                                    f"累计失败 {new_failures} 次")
                     if can_notify(state, instance_id, 'start_failed'):
                         balance_line = get_balance_line(user)
-                        msg = (f"机器: {name}\n当前流量: {curr_gb:.2f}GB{balance_line}\n"
-                               f"⚠️ 启动 API 调用失败: {err_msg}\n"
+                        msg = (f"机器: {sanitize_markdown(name)}\n当前流量: {curr_gb:.2f}GB{balance_line}\n"
+                               f"⚠️ 启动 API 调用失败: {sanitize_markdown(err_msg)}\n"
                                f"累计失败 {new_failures} 次，"
                                f"脚本将每 {RESOURCE_RETRY_COOLDOWN//60} 分钟自动重试。")
-                        send_tg_alert(tg_conf, "启动失败告警", msg, "red")
-                        mark_notified(state, instance_id, 'start_failed')
+                        if send_tg_alert(tg_conf, "启动失败告警", msg, "red"):
+                            mark_notified(state, instance_id, 'start_failed')
                     return
 
                 # --- 轮询等待实例真正进入 Running 状态 ---
@@ -271,9 +302,9 @@ def check_and_act(user, tg_conf, state):
                     logger.info(f"[{name}] 实例已恢复运行 ✅")
                     if can_notify(state, instance_id, 'resumed'):
                         balance_line = get_balance_line(user)
-                        msg = f"机器: {name}\n当前流量: {curr_gb:.2f}GB{balance_line}\n动作: 恢复运行 ✅"
-                        send_tg_alert(tg_conf, "恢复监控", msg, "green")
-                        mark_notified(state, instance_id, 'resumed')
+                        msg = f"机器: {sanitize_markdown(name)}\n当前流量: {curr_gb:.2f}GB{balance_line}\n动作: 恢复运行 ✅"
+                        if send_tg_alert(tg_conf, "恢复监控", msg, "green"):
+                            mark_notified(state, instance_id, 'resumed')
                 else:
                     # 超时未启动或回落到 Stopped，计为一次失败
                     new_failures = failures + 1
@@ -281,12 +312,12 @@ def check_and_act(user, tg_conf, state):
                     logger.warning(f"[{name}] 启动超时或被拒绝，累计失败 {new_failures} 次")
                     if can_notify(state, instance_id, 'start_failed'):
                         balance_line = get_balance_line(user)
-                        msg = (f"机器: {name}\n当前流量: {curr_gb:.2f}GB{balance_line}\n"
+                        msg = (f"机器: {sanitize_markdown(name)}\n当前流量: {curr_gb:.2f}GB{balance_line}\n"
                                f"⚠️ 尝试启动但 {START_WAIT_TIMEOUT}s 内未变为 Running 状态，"
                                f"累计失败 {new_failures} 次。\n"
                                f"脚本将每 {RESOURCE_RETRY_COOLDOWN//60} 分钟自动重试，无需手动干预。")
-                        send_tg_alert(tg_conf, "启动失败告警", msg, "red")
-                        mark_notified(state, instance_id, 'start_failed')
+                        if send_tg_alert(tg_conf, "启动失败告警", msg, "red"):
+                            mark_notified(state, instance_id, 'start_failed')
 
             elif status == "Running":
                 # 正常运行，重置计数
@@ -301,26 +332,57 @@ def check_and_act(user, tg_conf, state):
             if status == "Running":
                 logger.info(f"[{name}] 流量超标({curr_gb:.2f}GB >= {limit}GB)，正在停止...")
                 stop_req = StopInstanceRequest()
+                stop_req.set_protocol_type('https')
                 stop_req.set_InstanceId(instance_id)
                 client.do_action_with_exception(stop_req)
                 if can_notify(state, instance_id, 'overlimit', OVERLIMIT_COOLDOWN):
                     balance_line = get_balance_line(user)
-                    msg = f"机器: {name}\n当前流量: {curr_gb:.2f}GB{balance_line}\n动作: 已触发止损关机 \U0001f6d1"
-                    send_tg_alert(tg_conf, "流量预警", msg, "red")
-                    mark_notified(state, instance_id, 'overlimit')
+                    msg = f"机器: {sanitize_markdown(name)}\n当前流量: {curr_gb:.2f}GB{balance_line}\n动作: 已触发止损关机 \U0001f6d1"
+                    if send_tg_alert(tg_conf, "流量预警", msg, "red"):
+                        mark_notified(state, instance_id, 'overlimit')
             else:
                 # 已处于停止状态，每天提醒一次
                 logger.info(f"[{name}] 已停止止损 - {curr_gb:.2f}GB")
                 if can_notify(state, instance_id, 'overlimit', OVERLIMIT_COOLDOWN):
                     balance_line = get_balance_line(user)
-                    msg = f"机器: {name}\n当前流量: {curr_gb:.2f}GB{balance_line}\n状态: 流量超标，已保持关机 \U0001f6d1"
-                    send_tg_alert(tg_conf, "流量超标提醒", msg, "red")
-                    mark_notified(state, instance_id, 'overlimit')
+                    msg = f"机器: {sanitize_markdown(name)}\n当前流量: {curr_gb:.2f}GB{balance_line}\n状态: 流量超标，已保持关机 \U0001f6d1"
+                    if send_tg_alert(tg_conf, "流量超标提醒", msg, "red"):
+                        mark_notified(state, instance_id, 'overlimit')
 
     except Exception as e:
         logger.error(f"[{name}] 检查出错: {e}")
+        # 连续多次巡检失败说明监控对该实例已"失明"（期间无法自动止损），及时提醒人工介入
+        info = state.setdefault(instance_id, {})
+        info['check_failures'] = info.get('check_failures', 0) + 1
+        if info['check_failures'] >= CHECK_FAILURE_ALERT_THRESHOLD and can_notify(state, instance_id, 'check_failed'):
+            msg = (f"机器: {sanitize_markdown(name)}\n"
+                   f"⚠️ 已连续 {info['check_failures']} 次巡检失败，最近错误: {sanitize_markdown(e)}\n"
+                   f"期间流量监控与自动止损不可用，请人工确认实例状态。")
+            if send_tg_alert(tg_conf, "监控异常告警", msg, "red"):
+                mark_notified(state, instance_id, 'check_failed')
+
+def acquire_run_lock():
+    """获取运行锁，防止上一轮巡检未结束时 cron 再次并发启动。
+    返回锁文件句柄（调用方需保持引用）；已有实例在运行返回 None；无法加锁的环境返回 True 继续执行。"""
+    if fcntl is None:
+        return True
+    try:
+        lock_fp = open(LOCK_FILE, 'w')
+    except OSError as e:
+        logger.warning(f"无法创建锁文件: {e}，本轮不加锁继续执行")
+        return True
+    try:
+        fcntl.flock(lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (IOError, OSError):
+        lock_fp.close()
+        return None
+    return lock_fp
 
 def main():
+    lock = acquire_run_lock()
+    if lock is None:
+        logger.info("上一轮监控仍在运行，本轮跳过")
+        return
     config = load_config()
     state  = load_state()
     for user in config.get('users', []):

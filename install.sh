@@ -310,6 +310,8 @@ function run_full_install() {
     ]
 }
 EOF
+    # 配置文件包含 AK/SK 与 Bot Token，收紧为仅 root 可读写
+    chmod 600 "$CONFIG_FILE"
     echo -e "${GREEN}配置文件已生成: ${CONFIG_FILE}${NC}"
 
     # 9. 设置 Crontab
@@ -491,6 +493,8 @@ except Exception:
 # ================= 脚本入口 =================
 
 if [ -f "$CONFIG_FILE" ]; then
+    # 修正历史版本安装的配置文件权限（包含 AK/SK，避免全局可读）
+    chmod 600 "$CONFIG_FILE" 2>/dev/null || true
     # 如果检测到 config.json 已存在，进入管理菜单
     run_manage_menu
 else

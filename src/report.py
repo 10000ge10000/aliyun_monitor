@@ -52,20 +52,55 @@ def load_config():
     with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
         return json.load(f)
 
+def sanitize_markdown(text):
+    """将 legacy Markdown 特殊字符替换为空格，避免备注名/错误信息中的特殊字符导致整条日报发送失败"""
+    text = str(text)
+    for ch in ('_', '*', '`', '['):
+        text = text.replace(ch, ' ')
+    return text.strip()
+
+# Telegram 单条消息上限 4096 字符，留出余量按行分片
+TG_MESSAGE_LIMIT = 4000
+
+def split_message(message, limit=TG_MESSAGE_LIMIT):
+    """按行边界将超长消息切分为多段，保证每段不超过 Telegram 上限"""
+    chunks = []
+    current = ""
+    for line in message.split("\n"):
+        candidate = line if not current else current + "\n" + line
+        if len(candidate) > limit and current:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
 def send_tg_report(tg_conf, message):
     if not tg_conf.get('bot_token') or not tg_conf.get('chat_id'):
         logger.warning("Telegram 配置不完整，跳过日报发送")
         return
-    try:
-        url = f"https://api.telegram.org/bot{tg_conf['bot_token']}/sendMessage"
-        data = {"chat_id": tg_conf['chat_id'], "text": message, "parse_mode": "Markdown"}
-        response = requests.post(url, json=data, timeout=10)
-        if response.status_code == 200:
-            logger.info("Telegram 日报发送成功")
-        else:
-            logger.error("Telegram 日报发送失败: HTTP %s, %s", response.status_code, response.text)
-    except Exception as e:
-        logger.exception("Telegram 日报发送异常: %s", e)
+    url = f"https://api.telegram.org/bot{tg_conf['bot_token']}/sendMessage"
+    chunks = split_message(message)
+    for index, chunk in enumerate(chunks, 1):
+        payloads = [
+            {"chat_id": tg_conf['chat_id'], "text": chunk, "parse_mode": "Markdown"},
+            # Markdown 解析失败或网络抖动时，退化为纯文本再试一次，保证日报必达
+            {"chat_id": tg_conf['chat_id'], "text": chunk},
+        ]
+        sent = False
+        for data in payloads:
+            try:
+                response = requests.post(url, json=data, timeout=10)
+                if response.status_code == 200:
+                    sent = True
+                    break
+                logger.error("Telegram 日报发送失败: HTTP %s, %s", response.status_code, response.text)
+            except Exception as e:
+                logger.exception("Telegram 日报发送异常: %s", e)
+        if sent:
+            logger.info("Telegram 日报发送成功 (%s/%s)", index, len(chunks))
 
 def do_common_request(client, domain, version, action, params=None, method='POST', timeout=30, retries=3):
     for attempt in range(1, retries + 1):
@@ -143,7 +178,7 @@ def main():
                 user_name = user.get('name', '').strip() or target_id or "Unknown_Device"
                 logger.info("[%s] 监控已暂停，日报仅标注暂停状态", user_name)
                 report_lines.append(
-                    f"👤 *{user_name}* (暂停)\n"
+                    f"👤 *{sanitize_markdown(user_name)}* (暂停)\n"
                     f"   ⏸️ 监控: 已暂停\n"
                 )
                 continue
@@ -237,7 +272,8 @@ def main():
             bill_str = f"${bill_amount:.2f}" if bill_amount != -1 else "Fail"
             if bill_amount != -1 and bill_currency == 'CNY':
                 bill_str = f"¥{bill_amount:.2f}"
-                bill_limit = bill_limit * 7.0  # USD 阈值换算为 CNY
+                # USD 阈值换算为 CNY，汇率可通过配置项 usd_cny_rate 覆盖（默认 7.0）
+                bill_limit = bill_limit * float(user.get('usd_cny_rate', 7.0))
             elif bill_amount != -1:
                 # 覆盖货币符号（支持根据配置动态显示）
                 bill_str = f"{user.get('currency', '$')}{bill_amount:.2f}"
@@ -250,6 +286,7 @@ def main():
                 balance_str = "⚠️ 查询失败"
 
             status_icon = "✅"
+            if bill_amount == -1: status_icon = "⚠️ 账单查询异常"
             if traffic_gb >= 0 and traffic_gb > quota: status_icon = "⚠️ 流量超标"
             if bill_amount > bill_limit: status_icon = "💸 扣费预警"
             if traffic_gb < 0: status_icon = "⚠️ 流量查询异常"
@@ -259,7 +296,7 @@ def main():
             if status == "NotFound": run_icon = "❓"
 
             user_report = (
-                f"👤 *{user_name}* ({spec})\n"
+                f"👤 *{sanitize_markdown(user_name)}* ({spec})\n"
                 f"   🖥️ 状态: {run_icon} {status}\n"
                 f"   🌐 IP: `{ip}`\n"
                 f"   📉 流量: {traffic_str}\n"
@@ -272,7 +309,7 @@ def main():
 
         except Exception as e:
             logger.exception("处理用户 %s 时出错: %s", user.get('name', 'Unknown'), e)
-            report_lines.append(f"❌ *{user.get('name', 'Unknown')}* Error: {str(e)}\n")
+            report_lines.append(f"❌ *{sanitize_markdown(user.get('name', 'Unknown'))}* Error: {sanitize_markdown(e)}\n")
 
     final_msg = "\n".join(report_lines)
     send_tg_report(tg_conf, final_msg)
