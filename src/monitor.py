@@ -3,6 +3,7 @@ import json
 import sys
 import logging
 import os
+import signal
 import time
 import requests
 try:
@@ -50,12 +51,18 @@ OVERLIMIT_COOLDOWN = 86400
 # 等待实例启动：轮询超时 / 间隔（秒）
 START_WAIT_TIMEOUT  = 180
 START_POLL_INTERVAL = 10
+# 单实例巡检硬超时：覆盖正常的启动轮询时间，避免网络请求永久占用全局运行锁
+USER_CHECK_TIMEOUT = START_WAIT_TIMEOUT + 120
 # 连续启动失败超过此次数后，降低重试频率（每 30 分钟重试一次，而非每 5 分钟）
 MAX_START_FAILURES = 3
 # 资源不足时的重试冷却时间（秒）：30 分钟重试一次，而不是彻底放弃
 RESOURCE_RETRY_COOLDOWN = 1800
 # 连续巡检失败达到此次数后，发送"监控失明"告警提醒人工介入
 CHECK_FAILURE_ALERT_THRESHOLD = 3
+
+
+class MonitorTimeout(BaseException):
+    """单实例巡检超时，必须穿透业务层的 broad except，交由外层 watchdog 处理。"""
 
 # 初始化日志
 logger = logging.getLogger(__name__)
@@ -361,6 +368,35 @@ def check_and_act(user, tg_conf, state):
             if send_tg_alert(tg_conf, "监控异常告警", msg, "red"):
                 mark_notified(state, instance_id, 'check_failed')
 
+
+def _raise_monitor_timeout(_signum, _frame):
+    raise MonitorTimeout()
+
+
+def check_user_with_timeout(user, tg_conf, state):
+    """执行单实例巡检并设置硬超时，避免某个 SDK 网络请求永久持有全局锁。"""
+    if not all(hasattr(signal, name) for name in ("SIGALRM", "ITIMER_REAL", "setitimer", "getitimer")):
+        check_and_act(user, tg_conf, state)
+        return
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    signal.signal(signal.SIGALRM, _raise_monitor_timeout)
+    signal.setitimer(signal.ITIMER_REAL, USER_CHECK_TIMEOUT)
+    try:
+        check_and_act(user, tg_conf, state)
+    except MonitorTimeout:
+        instance_id = user.get('instance_id', '<unknown>')
+        name = user.get('name', instance_id)
+        info = state.setdefault(instance_id, {})
+        info['check_failures'] = info.get('check_failures', 0) + 1
+        logger.error(f"[{name}] 单实例巡检超过 {USER_CHECK_TIMEOUT}s，已跳过本实例，避免监控锁长期占用")
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer != (0.0, 0.0):
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+
 def acquire_run_lock():
     """获取运行锁，防止上一轮巡检未结束时 cron 再次并发启动。
     返回锁文件句柄（调用方需保持引用）；已有实例在运行返回 None；无法加锁的环境返回 True 继续执行。"""
@@ -383,11 +419,15 @@ def main():
     if lock is None:
         logger.info("上一轮监控仍在运行，本轮跳过")
         return
-    config = load_config()
-    state  = load_state()
-    for user in config.get('users', []):
-        check_and_act(user, config.get('telegram', {}), state)
-    save_state(state)
+    try:
+        config = load_config()
+        state  = load_state()
+        for user in config.get('users', []):
+            check_user_with_timeout(user, config.get('telegram', {}), state)
+        save_state(state)
+    finally:
+        if hasattr(lock, 'close'):
+            lock.close()
 
 if __name__ == "__main__":
     main()

@@ -67,6 +67,13 @@ def split_message(message, limit=TG_MESSAGE_LIMIT):
     chunks = []
     current = ""
     for line in message.split("\n"):
+        # 单行本身也可能超过限制（例如异常堆栈或超长实例名），需要硬切分。
+        while len(line) > limit:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:limit])
+            line = line[limit:]
         candidate = line if not current else current + "\n" + line
         if len(candidate) > limit and current:
             chunks.append(current)
