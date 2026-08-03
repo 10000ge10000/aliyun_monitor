@@ -34,7 +34,7 @@ fi
 
 # 收集单个用户信息的函数
 function get_single_user_json() {
-    local AK="" SK="" REGION="" INSTANCE="" NAME="" LIMIT="" BILL_ENDPOINT="" CURRENCY=""
+    local AK="" SK="" REGION="" INSTANCE="" NAME="" LIMIT="" BILL_ENDPOINT="" CURRENCY="" RESGROUP=""
 
     echo -e "\n${BLUE}>> 配置阿里云账号/实例信息${NC}"
     read -p "请输入备注名 (例如 HK-Server): " NAME
@@ -80,14 +80,17 @@ function get_single_user_json() {
         *) read -p "请输入 Region ID (如 cn-shanghai): " REGION ;;
     esac
 
+    echo -e "${CYAN}💡 提示: 如RAM用户授权到资源组，请输入资源组ID，否则留空${NC}"
+    read -p "资源组 ID (留空跳过): " RESGROUP
+
     echo -e "${CYAN}💡 提示: 请前往 ECS 控制台 -> 实例列表 -> 实例 ID 列 (以 i- 开头)${NC}"
     read -p "ECS 实例 ID: " INSTANCE
     
     read -p "关机阈值 (GB, 默认180): " LIMIT
     LIMIT=${LIMIT:-180}
 
-    # 将构建好的 JSON 字符串赋值给全局变量 (去除了 resgroup，加入了 bill_endpoint 和 currency)
-    CURRENT_USER_JSON="{\"name\": \"$NAME\", \"ak\": \"$AK\", \"sk\": \"$SK\", \"region\": \"$REGION\", \"instance_id\": \"$INSTANCE\", \"traffic_limit\": $LIMIT, \"quota\": 200, \"bill_endpoint\": \"$BILL_ENDPOINT\", \"currency\": \"$CURRENCY\", \"paused\": false}"
+    # 将构建好的 JSON 字符串赋值给全局变量
+    CURRENT_USER_JSON="{\"name\": \"$NAME\", \"ak\": \"$AK\", \"sk\": \"$SK\", \"region\": \"$REGION\", \"instance_id\": \"$INSTANCE\", \"traffic_limit\": $LIMIT, \"quota\": 200, \"bill_endpoint\": \"$BILL_ENDPOINT\", \"currency\": \"$CURRENCY\", \"resgroup\": \"$RESGROUP\", \"paused\": false}"
 }
 
 function ensure_python_env() {
