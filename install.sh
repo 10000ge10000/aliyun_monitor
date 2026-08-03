@@ -279,6 +279,11 @@ function run_full_install() {
         ADMIN_USERS_JSON="[]"
     fi
 
+    # 6.5 交互式配置 Bark（可选）
+    echo -e "\n${BLUE}### 配置 Bark（可选） ###${NC}"
+    echo -e "${CYAN}💡 提示: Bark 是 iOS 上的推送通知工具，用于接收监控报警${NC}"
+    read -p "请输入 Bark 推送地址 (如无可直接回车跳过): " BARK_URL
+
     # 7. 配置阿里云对象
     USERS_JSON=""
     while true; do
@@ -305,6 +310,9 @@ function run_full_install() {
         "chat_id": "$TG_ID"
     },
     "admin_users": $ADMIN_USERS_JSON,
+    "bark": {
+        "bark_url": "$BARK_URL"
+    },
     "users": [
         $USERS_JSON
     ]

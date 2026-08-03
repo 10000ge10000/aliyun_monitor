@@ -109,6 +109,17 @@ def send_tg_report(tg_conf, message):
         if sent:
             logger.info("Telegram 日报发送成功 (%s/%s)", index, len(chunks))
 
+def send_bark_report(bark_conf, message):
+    if not bark_conf.get('bark_url'):
+        return
+    try:
+        url = f"{bark_conf['bark_url']}/Aliyun监控/{message}"
+        requests.get(url, timeout=10)
+        logger.info("Bark 日报发送成功")
+    except Exception as e:
+        logger.error("Bark 日报发送失败: %s", e)
+
+
 def do_common_request(client, domain, version, action, params=None, method='POST', timeout=30, retries=3):
     for attempt in range(1, retries + 1):
         try:
@@ -168,6 +179,7 @@ def main():
 
     users = config.get('users', [])
     tg_conf = config.get('telegram', {})
+    bark_conf = config.get('bark', {})
     
     report_lines = []
     balance_cache = {}  # 同一账号(AK)的余额只查询一次
@@ -320,6 +332,7 @@ def main():
 
     final_msg = "\n".join(report_lines)
     send_tg_report(tg_conf, final_msg)
+    send_bark_report(bark_conf, final_msg)
 
 if __name__ == "__main__":
     main()
