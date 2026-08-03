@@ -88,7 +88,11 @@
 
 使用 **root 用户** 登录 Alpine 后，下载并执行脚本：
 ```bash
-wget -qO- https://raw.githubusercontent.com/10000ge10000/aliyun_monitor/main/install2.sh | sh
+# wget
+bash <(wget -qO- https://raw.githubusercontent.com/10000ge10000/aliyun_monitor/main/install2.sh)
+
+# curl
+bash <(curl -sL https://raw.githubusercontent.com/10000ge10000/aliyun_monitor/main/install2.sh)
 ```
 
 ---
@@ -98,7 +102,11 @@ wget -qO- https://raw.githubusercontent.com/10000ge10000/aliyun_monitor/main/ins
 使用 **root 用户** 在任意连通互联网的 Linux 服务器或所监控的 ECS 本机上执行：
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/10000ge10000/aliyun_monitor/main/install.sh | sh
+# wget
+bash <(wget -qO- https://raw.githubusercontent.com/10000ge10000/aliyun_monitor/main/install.sh)
+
+# curl
+bash <(curl -sL https://raw.githubusercontent.com/10000ge10000/aliyun_monitor/main/install.sh)
 ```
 
 脚本将提供丝滑的交互式配置，自动：
@@ -162,7 +170,11 @@ systemctl stop aliyun-ecs-bot.service
 ## 🗑️ 卸载
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/10000ge10000/aliyun_monitor/main/uninstall.sh | sh
+# wget
+bash <(wget -qO- https://raw.githubusercontent.com/10000ge10000/aliyun_monitor/main/uninstall.sh)
+
+# curl
+bash <(curl -sL https://raw.githubusercontent.com/10000ge10000/aliyun_monitor/main/uninstall.sh)
 ```
 
 ---
